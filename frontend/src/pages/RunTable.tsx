@@ -1,8 +1,8 @@
 // Forecasting/src/pages/RunTable.tsx
+import type { CSSProperties } from "react";
 import type { Run } from "../api/types";
-import { StatusBadge } from "./StatusBadge";
+import { StatusBadge } from "../components/StatusBadge";
 
-type ViewState = "overview" | "runs" | "forecast" | "settings"
 
 export function RunTable({
   runs,
@@ -96,7 +96,7 @@ export function RunTable({
   );
 }
 
-const th: React.CSSProperties = {
+const th: CSSProperties = {
   textAlign: "left",
   padding: "10px 12px",
   fontSize: 12,
@@ -105,9 +105,9 @@ const th: React.CSSProperties = {
   whiteSpace: "nowrap",
 };
 
-const thId: React.CSSProperties = { ...th, width: 260 };
+const thId: CSSProperties = { ...th, width: 260 };
 
-const td: React.CSSProperties = {
+const td: CSSProperties = {
   padding: "10px 12px",
   borderBottom: "1px solid var(--border)",
   fontSize: 13,
@@ -115,7 +115,7 @@ const td: React.CSSProperties = {
   color: "var(--text)",
 };
 
-const tdMono: React.CSSProperties = {
+const tdMono: CSSProperties = {
   ...td,
   fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
   fontSize: 12,

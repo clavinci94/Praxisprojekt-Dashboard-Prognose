@@ -1,4 +1,4 @@
-/* Clerion AI Solutions / Enterprise — PowerBI-like Light Theme */
+/* Clerion AI Solutions / Enterprise â€” PowerBI-like Light Theme */
 
 :root {
   --bg: #f6f8fb;
@@ -527,7 +527,7 @@ a { color: inherit; text-decoration: none; }
 .dropdownDivider { height: 1px; background: var(--border); margin: 6px 0; }
 /* ----------------------------
    PowerBI-alike alias layer
-   (keine Refactors nötig)
+   (keine Refactors nÃ¶tig)
 ---------------------------- */
 
 /* Buttons: JSX nutzt btn-primary etc, CSS hat btnPrimary */
@@ -589,7 +589,7 @@ a { color: inherit; text-decoration: none; }
 .tableCompact th { font-size: 11px; }
 .tableCompact td { font-size: 13px; }
 
-/* Subtle “PowerBI grid” feel for Recharts container */
+/* Subtle â€œPowerBI gridâ€ feel for Recharts container */
 .recharts-wrapper { font-variant-numeric: tabular-nums; }
 /* ----------------------------
    PowerBI-like Tooltip + Legend

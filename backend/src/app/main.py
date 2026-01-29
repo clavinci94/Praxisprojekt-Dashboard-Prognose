@@ -8,8 +8,8 @@ from fastapi import APIRouter, FastAPI
 from fastapi.responses import PlainTextResponse
 from starlette.requests import Request
 
-from app.api.routes.forecast import router as forecast_router
 from app.services.datasets import discover_datasets
+from app.api.router import router as api_router
 
 app = FastAPI(title="forecast")
 
@@ -36,5 +36,7 @@ def get_datasets() -> List[Dict[str, Any]]:
 
 # --- Routes ---
 # Keep the single /api prefix here (avoid /api/api)
-app.include_router(forecast_router, prefix="/api")
 app.include_router(datasets_router, prefix="/api")
+
+# Main API router (already prefixed with /api inside)
+app.include_router(api_router)

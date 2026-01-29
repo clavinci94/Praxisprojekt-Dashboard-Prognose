@@ -110,20 +110,45 @@ def forecast_endpoint(model_key: str, req: ForecastRequest):
         )
 
     # History bis VORTAG von start_date
-    hist_series = series.loc[: start_ts - pd.Timedelta(days=1)]
+    hist_series = series.loc[series.index < start_ts]
     if len(hist_series) == 0:
         raise HTTPException(status_code=400, detail="Not enough history before start_date")
 
-    yhat = forecast_next_days(hist_series, horizon=req.horizon_days)
+    history_daily_y = [float(v) for v in hist_series.tolist()]
 
-    forecast_points = [
-        ForecastPoint(date=ts.date().isoformat(), forecast=float(val))
-        for ts, val in yhat.items()
-    ]
+    # start_date immer als ISO-String
+    start_date_str = req.start_date.isoformat() if hasattr(req.start_date, "isoformat") else str(req.start_date)
 
+    yhat = forecast_next_days(
+        model_key=model_key,
+        history_daily_y=history_daily_y,
+        start_date=start_date_str,
+        horizon_days=req.horizon_days,
+    )
+
+    # yhat ist List[Dict[str, float]]
+    forecast_points: list[ForecastPoint] = []
+    for row in yhat:
+        date_str = row.get("date") or row.get("ds") or row.get("timestamp")
+
+        val = row.get("forecast")
+        if val is None:
+            val = row.get("yhat")
+        if val is None:
+            val = row.get("value")
+
+        if date_str is None or val is None:
+            raise HTTPException(status_code=500, detail=f"Unexpected forecast row shape: {row}")
+
+        forecast_points.append(
+            ForecastPoint(
+                date=str(date_str)[:10],
+                forecast=float(val),
+            )
+        )
     return ForecastResponse(
         model=model_key,
-        start_date=req.start_date.isoformat(),
+        start_date=start_date_str,
         horizon_days=req.horizon_days,
         forecast=forecast_points,
     )

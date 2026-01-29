@@ -1,22 +1,28 @@
-# app/api/forecast_results.py
+# backend/src/app/api/routes/forecast_result.py
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException
-from typing import Any, Dict
+"""Deprecated compatibility router.
 
-from ..db.forecast_results import get_forecast_result, upsert_forecast_result
+Historically there was a separate module persisting forecast results.
+The current code derives forecasts via the /runs endpoints (runs.py),
+so this module delegates to runs.py for backward compatibility.
 
-router = APIRouter(tags=["runs"])
+Note: Do not include this router together with runs.py in the same FastAPI app,
+otherwise the /runs/{run_id}/forecast route will be registered twice.
+"""
 
-@router.get("/runs/{run_id}/forecast")
-def get_run_forecast(run_id: str) -> Dict[str, Any]:
-    payload = get_forecast_result(run_id)
-    if payload is None:
-        raise HTTPException(status_code=404, detail="No forecast result stored for this run_id.")
-    return payload
+from fastapi import APIRouter
 
-# Optional (für Worker): Ergebnis speichern via API
-@router.put("/runs/{run_id}/forecast")
-def put_run_forecast(run_id: str, payload: Dict[str, Any]) -> Dict[str, str]:
-    upsert_forecast_result(run_id, payload)
-    return {"status": "ok"}
+from app.api.routes.runs import (
+    ForecastResponse,
+    build_legacy_forecast_from_series,
+    get_run_series,
+)
+
+router = APIRouter(prefix="/runs", tags=["runs"])
+
+
+@router.get("/{run_id}/forecast", response_model=ForecastResponse)
+def get_run_forecast(run_id: str) -> ForecastResponse:
+    sr = get_run_series(run_id)
+    return build_legacy_forecast_from_series(sr)

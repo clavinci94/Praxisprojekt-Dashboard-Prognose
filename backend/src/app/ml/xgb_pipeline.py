@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Tuple
@@ -8,14 +10,38 @@ import numpy as np
 import pandas as pd
 from xgboost import XGBRegressor
 
-# === Pfade ===
-PROJECT_ROOT = Path(__file__).resolve().parents[3]  # backend/
+# ============================================================
+# Paths / Config
+# ============================================================
+
+def _guess_project_root(here: Path) -> Path:
+    """
+    Best-effort project root detection.
+
+    Walk upwards and pick the first directory that looks like the backend root
+    (contains 'models' or 'pyproject.toml' or 'requirements.txt'). Fallback to
+    3 levels up to preserve the previous behaviour.
+    """
+    for p in [here, *here.parents]:
+        if (p / "models").exists() or (p / "pyproject.toml").exists() or (p / "requirements.txt").exists():
+            return p
+    # previous heuristic (may be wrong depending on where this file lives)
+    return here.parents[3]
+
+
+HERE = Path(__file__).resolve()
+PROJECT_ROOT = _guess_project_root(HERE)
 MODELS_DIR = PROJECT_ROOT / "models"
 
-CARGOLOGIC_DATA_DIR="/Users/claudio/Desktop/Projekt Cargologic"
+# Data directory:
+# - Prefer env var CARGOLOGIC_DATA_DIR
+# - Otherwise default to '<PROJECT_ROOT>/data'
+DATA_DIR = Path(os.environ.get("CARGOLOGIC_DATA_DIR", str(PROJECT_ROOT / "data"))).expanduser().resolve()
 
+# ============================================================
+# Jobs
+# ============================================================
 
-# === 4 Jobs ===
 @dataclass(frozen=True)
 class Job:
     key: str
@@ -31,15 +57,19 @@ JOBS: List[Job] = [
     Job("tra_export", "cl_tra_export.csv", "fl_gmt_departure_date", "xgb_tra_export.json"),
 ]
 
-# === Feature Engineering Settings ===
+# ============================================================
+# Feature engineering settings
+# ============================================================
+
 LAGS = [1, 7, 14, 28]
 ROLLS = [7, 14, 28]
 
 
 def _load_daily_weight(csv_path: Path, time_col: str) -> pd.Series:
     """
-    Aggregiert daily Summe(weight_sum) (fallback: awb_weight),
-    füllt fehlende Tage mit 0.
+    Aggregate to daily sum of weight.
+
+    Tries 'weight_sum' first, falls back to 'awb_weight'. Missing days are filled with 0.
     """
     usecols = [time_col, "weight_sum", "awb_weight"]
     df = pd.read_csv(csv_path, usecols=lambda c: c in usecols)
@@ -47,7 +77,7 @@ def _load_daily_weight(csv_path: Path, time_col: str) -> pd.Series:
     df[time_col] = pd.to_datetime(df[time_col], errors="coerce")
     df = df.dropna(subset=[time_col])
 
-    # weight_sum bevorzugt, fallback awb_weight
+    # Prefer weight_sum, fall back to awb_weight
     w = pd.to_numeric(df.get("weight_sum"), errors="coerce")
     if w.isna().all():
         w = pd.to_numeric(df.get("awb_weight"), errors="coerce")
@@ -60,7 +90,10 @@ def _load_daily_weight(csv_path: Path, time_col: str) -> pd.Series:
 
     daily = df.groupby(df[time_col].dt.floor("D"))["_w"].sum().sort_index()
 
-    # Lücken füllen
+    # Fill gaps
+    if daily.empty:
+        raise ValueError(f"No valid rows found in {csv_path} for time_col='{time_col}'")
+
     full_idx = pd.date_range(daily.index.min(), daily.index.max(), freq="D")
     daily = daily.reindex(full_idx, fill_value=0.0)
     return daily.astype(float)
@@ -68,19 +101,21 @@ def _load_daily_weight(csv_path: Path, time_col: str) -> pd.Series:
 
 def _make_features(daily: pd.Series) -> Tuple[pd.DataFrame, List[str]]:
     """
-    1-step-ahead supervised features:
-    y(t) wird aus Features von t-1, t-7, ... vorhergesagt.
+    1-step-ahead supervised features in log-space.
+
+    Target: y_log(t)
+    Features: calendar + lags/rolling computed on past values only.
     """
     s = daily.copy()
     df = pd.DataFrame({"date": s.index, "y": s.values})
     df["y_log"] = np.log1p(df["y"].clip(lower=0.0))
 
-    # Kalenderfeatures
+    # Calendar
     df["dow"] = df["date"].dt.dayofweek.astype(int)
     df["month"] = df["date"].dt.month.astype(int)
     df["is_weekend"] = (df["dow"] >= 5).astype(int)
 
-    # Lags + Rolling auf log-scale
+    # Lags + rolling on log-scale (shift to avoid leakage)
     for lag in LAGS:
         df[f"lag_{lag}"] = df["y_log"].shift(lag)
 
@@ -100,7 +135,7 @@ def _make_features(daily: pd.Series) -> Tuple[pd.DataFrame, List[str]]:
 
 
 def _base_model_params() -> dict:
-    # zentraler Param-Satz für Konsistenz
+    # Central param set for consistent training
     return dict(
         n_estimators=800,
         learning_rate=0.05,
@@ -125,7 +160,9 @@ def _train_point(df_feat: pd.DataFrame, feature_cols: List[str]) -> XGBRegressor
 def _train_quantile(df_feat: pd.DataFrame, feature_cols: List[str], alpha: float) -> XGBRegressor:
     """
     Quantile regression (log-space).
-    Requires xgboost version that supports objective 'reg:quantileerror'.
+
+    Note: requires an xgboost version that supports objective 'reg:quantileerror'.
+    If your installed xgboost doesn't support it, training will raise.
     """
     X = df_feat[feature_cols].to_numpy(dtype=float)
     y = df_feat["y_log"].to_numpy(dtype=float)
@@ -142,6 +179,12 @@ def _train_quantile(df_feat: pd.DataFrame, feature_cols: List[str], alpha: float
 def train_and_save_all() -> Dict[str, Path]:
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
+    if not DATA_DIR.exists():
+        raise FileNotFoundError(
+            f"DATA_DIR does not exist: {DATA_DIR}\n"
+            f"Set env var CARGOLOGIC_DATA_DIR or create a 'data' folder under {PROJECT_ROOT}."
+        )
+
     out: Dict[str, Path] = {}
 
     for job in JOBS:
@@ -154,7 +197,7 @@ def train_and_save_all() -> Dict[str, Path]:
 
         # Save feature order once (shared for p50/p05/p95)
         feat_path = MODELS_DIR / job.model_file.replace(".json", "_features.json")
-        feat_path.write_text(pd.Series(feature_cols).to_json(orient="values"))
+        feat_path.write_text(json.dumps(feature_cols, ensure_ascii=False, indent=2), encoding="utf-8")
 
         # --- Train models ---
         m50 = _train_point(df_feat, feature_cols)
@@ -165,6 +208,7 @@ def train_and_save_all() -> Dict[str, Path]:
         p05_path = MODELS_DIR / job.model_file.replace(".json", "_p05.json")
         p95_path = MODELS_DIR / job.model_file.replace(".json", "_p95.json")
 
+        # Note: despite '.json' extension, these are xgboost booster model files.
         m50.get_booster().save_model(str(base_path))
         m05.get_booster().save_model(str(p05_path))
         m95.get_booster().save_model(str(p95_path))

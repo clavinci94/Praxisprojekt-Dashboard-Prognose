@@ -15,47 +15,6 @@ function addDaysIsoUTC(isoDate: string, days: number): string {
   return d.toISOString().slice(0, 10);
 }
 
-/* =========================
-   data loader
-========================= */
-
-async function loadAll() {
-  try {
-    setLoading(true);
-    setError(null);
-
-    if (runId) {
-      // RUN MODE (historischer Lauf)
-      const res = await runsApi.getSeries(runId);
-      setPayload(res as any);
-    } else {
-  const endDate = addDaysIsoUTC(startDate, Math.max(1, horizonDays) - 1);
-  const datasetKey = String(modelKey);
-
-  const res = await fetchJson<SeriesResponse>(
-    `/api/series/${encodeURIComponent(datasetKey)}`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        start_date: startDate,
-        end_date: endDate,
-        history_days: historyDays,
-        include_quantiles: true,
-      }),
-    }
-  );
-
-  setPayload(res as any);
-}
-
-  } catch (e: any) {
-    setError(e?.message ?? String(e));
-  } finally {
-    setLoading(false);
-  }
-}
-
 function errorToString(err: unknown) {
   if (!err) return "Unbekannter Fehler";
   if (typeof err === "string") return err;
@@ -95,15 +54,17 @@ async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
 
 type LegacyActualPoint = { date: string; actual?: number; value?: number };
 
-async function fetchLegacyActuals(modelKey: string): Promise<Array<{ date: string; value: number }>> {
+async function fetchLegacyActuals(modelKey: string): Promise<Array<{ date: string; actual: number }>> {
   const arr = await fetchJson<LegacyActualPoint[]>(`/api/actuals/${encodeURIComponent(modelKey)}`);
   return (Array.isArray(arr) ? arr : [])
     .map((p) => ({
       date: String((p as any)?.date ?? "").slice(0, 10),
-      value: Number((p as any)?.value ?? (p as any)?.actual),
+      actual: Number((p as any)?.value ?? (p as any)?.actual),
     }))
-    .filter((p) => p.date && Number.isFinite(p.value));
+    .filter((p) => p.date && Number.isFinite(p.actual));
 }
+
+
 
 type ForecastApiResponse = {
   model?: string;
@@ -120,11 +81,20 @@ async function fetchForecast(modelKey: string, startDate: string, horizonDays: n
   });
 }
 
-function sliceHistory(actuals: Array<{ date: string; value: number }>, startDate: string, historyDays: number) {
+async function fetchRunSeries(runId: string): Promise<SeriesResponse> {
+  return await fetchJson<SeriesResponse>(`/api/runs/${encodeURIComponent(runId)}/series`);
+}
+
+async function fetchRunMetrics(runId: string): Promise<MetricsResponse> {
+  return await fetchJson<MetricsResponse>(`/api/metrics/runs/${encodeURIComponent(runId)}`);
+}
+
+function sliceHistory(actuals: Array<{ date: string; actual: number }>, startDate: string, historyDays: number) {
   const startTs = new Date(`${startDate}T00:00:00Z`).getTime();
   const filtered = actuals.filter((p) => new Date(`${p.date}T00:00:00Z`).getTime() < startTs);
   return filtered.slice(Math.max(0, filtered.length - Math.max(0, historyDays)));
 }
+
 
 /* ----------------------------- types ----------------------------- */
 
@@ -184,7 +154,7 @@ function parseSeriesToWeeklyPoints(payload: SeriesResponse): WeeklyPoint[] {
   for (const a of actualsArr) {
     const iso = a?.date ?? null;
     if (!iso) continue;
-    const v = a?.value ?? a?.actual ?? null;
+    const v = a?.actual ?? null;
     daily.push({
       iso: String(iso).slice(0, 10),
       week: isoWeekKey(String(iso)),
@@ -361,7 +331,7 @@ export function useForecastDashboardData({
 
     try {
       if (runId) {
-        const res = await runsApi.getSeries(runId);
+        const res = await fetchRunSeries(runId);
         setPayload(res as any);
       } else {
         const [actualsAll, fc] = await Promise.all([
@@ -393,13 +363,56 @@ export function useForecastDashboardData({
     } finally {
       setLoading((s) => ({ ...s, series: false }));
     }
+    // Optional: metrics are available for run mode via /api/metrics/runs/{run_id}
+    if (runId) {
+      setLoading((s) => ({ ...s, kpis: true, dailyErrors: true, outliers: true }));
+      try {
+        const mr = await fetchRunMetrics(runId);
+        setKpiMetrics(mr ?? null);
 
-    // These endpoints do not exist in your backend → keep as “not available”
-    setKpiMetrics(null);
-    setChartDailyErrors([]);
-    setOutlierDailyErrors([]);
-    setErrors((e) => ({ ...e, kpis: undefined, dailyErrors: undefined, outliers: undefined }));
-    setLoading((s) => ({ ...s, kpis: false, dailyErrors: false, outliers: false }));
+        const daily = Array.isArray((mr as any)?.daily_errors)
+          ? ((mr as any).daily_errors as DailyErrorPoint[])
+          : [];
+
+        const limited = dailyErrorLimit > 0 ? daily.slice(0, dailyErrorLimit) : daily;
+        setChartDailyErrors(limited);
+
+        // outliers: highest APE (fallback abs_error / error)
+        const scored = daily
+          .map((d: any) => ({
+            ...d,
+            __score:
+              d?.ape != null
+                ? Number(d.ape)
+                : d?.abs_error != null
+                  ? Number(d.abs_error)
+                  : d?.error != null
+                    ? Math.abs(Number(d.error))
+                    : 0,
+          }))
+          .sort((a: any, b: any) => (b.__score ?? 0) - (a.__score ?? 0));
+
+        const out = outlierLimit > 0 ? scored.slice(0, outlierLimit) : scored.slice(0, 50);
+        setOutlierDailyErrors(out as any);
+
+        setErrors((e) => ({ ...e, kpis: undefined, dailyErrors: undefined, outliers: undefined }));
+      } catch (err) {
+        const msg = errorToString(err);
+        setErrors((e) => ({ ...e, kpis: msg, dailyErrors: msg, outliers: msg }));
+        setKpiMetrics(null);
+        setChartDailyErrors([]);
+        setOutlierDailyErrors([]);
+      } finally {
+        setLoading((s) => ({ ...s, kpis: false, dailyErrors: false, outliers: false }));
+      }
+    } else {
+      // Live mode: backend does not expose metrics without a run id.
+      setKpiMetrics(null);
+      setChartDailyErrors([]);
+      setOutlierDailyErrors([]);
+      setErrors((e) => ({ ...e, kpis: undefined, dailyErrors: undefined, outliers: undefined }));
+      setLoading((s) => ({ ...s, kpis: false, dailyErrors: false, outliers: false }));
+    }
 
     void backtestDays;
     void dailyErrorLimit;

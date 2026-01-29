@@ -82,21 +82,6 @@ class RunParams(BaseModel):
         parse_iso_date(v)
         return v
 
-class DailyErrorPoint(BaseModel):
-    date: str
-    actual: float
-    forecast: float
-    error: float          # forecast - actual
-    abs_error: float
-    ape: Optional[float] = None  # abs(error)/abs(actual) if actual!=0
-
-class MetricsResponse(BaseModel):
-    run_id: str
-    model_key: str
-    window: Dict[str, Any]
-    metrics: Dict[str, Any]
-    daily_errors: List[DailyErrorPoint]
-
 
 class Run(BaseModel):
     id: str

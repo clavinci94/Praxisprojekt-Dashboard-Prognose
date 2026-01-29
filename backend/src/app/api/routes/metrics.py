@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 from datetime import date as date_type
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -68,9 +69,11 @@ def _resolve_csv_paths() -> List[Path]:
 
 
 def load_daily_series_from_csvs() -> pd.DataFrame:
-    """
-    Reads all 4 CSVs, concatenates, aggregates VALUE_COL per day.
-    Returns columns: date (YYYY-MM-DD), value (float)
+    """Reads all 4 CSVs, concatenates, aggregates VALUE_COL per day.
+
+    Returns a DataFrame with columns:
+      - date (YYYY-MM-DD as str)
+      - value (float)
     """
     paths = _resolve_csv_paths()
     frames: List[pd.DataFrame] = []
@@ -85,7 +88,6 @@ def load_daily_series_from_csvs() -> pd.DataFrame:
         tmp = df[[DATE_COL, VALUE_COL]].copy()
         tmp[DATE_COL] = pd.to_datetime(tmp[DATE_COL], errors="coerce", utc=True).dt.tz_convert(None)
         tmp = tmp.dropna(subset=[DATE_COL])
-
         tmp.rename(columns={DATE_COL: "date", VALUE_COL: "value"}, inplace=True)
         frames.append(tmp)
 
@@ -118,7 +120,7 @@ class DailyErrorPoint(BaseModel):
     date: str
     actual: float
     forecast: float
-    error: float       # forecast - actual
+    error: float  # forecast - actual
     abs_error: float
     ape: Optional[float] = None  # abs(error)/abs(actual) if actual!=0
 
@@ -133,6 +135,17 @@ class MetricsResponse(BaseModel):
     daily_errors: List[DailyErrorPoint]
 
 
+def _load_run_params_or_404(run_id: str) -> Dict[str, Any]:
+    with get_conn() as conn:
+        row = conn.execute("SELECT params_json FROM runs WHERE id = ?", (run_id,)).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Run not found")
+    try:
+        return json.loads(row["params_json"]) if row["params_json"] else {}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Invalid params_json for run: {e}")
+
+
 def compute_naive_backtest_metrics(
     *,
     model_key: str,
@@ -142,11 +155,13 @@ def compute_naive_backtest_metrics(
     daily_errors_limit: int,
     outliers_only: bool,
 ) -> MetricsResponse:
+    """Walk-forward naive baseline over aggregated daily totals.
 
+    forecast(t) = last observed actual before t.
     """
-    Walk-forward naive baseline:
-    forecast(t) = last actual before t
-    """
+    if daily_errors_limit < 1 or daily_errors_limit > 3650:
+        raise HTTPException(status_code=400, detail="daily_errors_limit out of range (1..3650)")
+
     daily_df = load_daily_series_from_csvs()
     daily_df["date_dt"] = pd.to_datetime(daily_df["date"])
     daily_df = daily_df.sort_values("date_dt")
@@ -176,31 +191,46 @@ def compute_naive_backtest_metrics(
     sum_actual = 0.0
     daily_errors: List[DailyErrorPoint] = []
 
-    # ... in der Schleife ...
-    if include_daily_errors:
-        daily_errors.append(
-            DailyErrorPoint(
-                date=dt,
-                actual=actual,
-                forecast=forecast,
-                error=err,
-                abs_error=ae,
-                ape=ape,
-            )
-        )
+    for _, r in window_df.iterrows():
+        dt = pd.to_datetime(r["date_dt"]).date().isoformat()
+        actual = float(r["value"])
+        forecast = max(0.0, prev)
+        err = forecast - actual
+        ae = abs(err)
+        ape = (ae / abs(actual)) if actual != 0 else None
+
+        errors.append(err)
+        abs_errors.append(ae)
+        sum_actual += actual
+        if ape is not None:
+            abs_pct_errors.append(ape)
 
         if include_daily_errors:
-            # optional: nur Top Outliers
-            if outliers_only:
-                def score(x: DailyErrorPoint) -> float:
-                    return float(x.ape) if x.ape is not None else float(x.abs_error)
+            daily_errors.append(
+                DailyErrorPoint(
+                    date=dt,
+                    actual=actual,
+                    forecast=forecast,
+                    error=err,
+                    abs_error=ae,
+                    ape=ape,
+                )
+            )
 
-                daily_errors = sorted(daily_errors, key=score, reverse=True)[:daily_errors_limit]
-            else:
-                # “letzte N Tage” (stabil & für Charts sinnvoll)
-                daily_errors = daily_errors[-daily_errors_limit:]
+        prev = actual
+
+    # post-process daily_errors
+    if include_daily_errors:
+        if outliers_only:
+
+            def score(x: DailyErrorPoint) -> float:
+                return float(x.ape) if x.ape is not None else float(x.abs_error)
+
+            daily_errors = sorted(daily_errors, key=score, reverse=True)[:daily_errors_limit]
         else:
-            daily_errors = []
+            daily_errors = daily_errors[-daily_errors_limit:]
+    else:
+        daily_errors = []
 
     n = int(len(window_df))
     mape = 100.0 * (sum(abs_pct_errors) / len(abs_pct_errors)) if abs_pct_errors else None
@@ -243,7 +273,6 @@ def metrics_live(
     )
 
 
-
 @router.get("/runs/{run_id}", response_model=MetricsResponse)
 def metrics_for_run(
     run_id: str,
@@ -252,7 +281,20 @@ def metrics_for_run(
     daily_errors_limit: int = 120,
     outliers_only: bool = False,
 ) -> MetricsResponse:
-    # ... run laden ...
+    if backtest_days < 7 or backtest_days > 3650:
+        raise HTTPException(status_code=400, detail="backtest_days out of range (7..3650)")
+
+    params = _load_run_params_or_404(run_id)
+    model_key = str(params.get("model_key") or "export")
+    start_date_raw = params.get("start_date")
+    if not start_date_raw:
+        raise HTTPException(status_code=400, detail="Run has no start_date in params")
+
+    try:
+        start_date = parse_iso_date(str(start_date_raw))
+    except Exception:
+        raise HTTPException(status_code=500, detail="Run start_date is not ISO YYYY-MM-DD")
+
     res = compute_naive_backtest_metrics(
         model_key=model_key,
         start_date=start_date,
@@ -263,4 +305,3 @@ def metrics_for_run(
     )
     res.run_id = run_id
     return res
-
