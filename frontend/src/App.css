@@ -1,0 +1,685 @@
+/* Clerion AI Solutions / Enterprise — PowerBI-like Light Theme */
+
+:root {
+  --bg: #f6f8fb;
+  --surface: #ffffff;
+  --surface-2: #f3f6fb;
+  --surface-hover: #f1f5f9;
+
+  --border: #e5eaf2;
+  --border-active: #cfd8e6;
+
+  --text-primary: #0f172a;
+  --text-secondary: #5b6b82;
+  --text-tertiary: #8a9ab3;
+
+  --accent: #0066ff;
+  --accent-hover: #0052cc;
+  --accent-glow: rgba(0, 102, 255, 0.10);
+
+  --success: #10b981; --success-bg: #d1fae5;
+  --danger: #ef4444; --danger-bg: #fee2e2;
+  --warning: #f59e0b; --warning-bg: #fef3c7;
+
+  --radius: 10px;
+  --shadow-sm: 0 1px 2px rgba(16, 24, 40, 0.06);
+  --shadow-md: 0 12px 28px rgba(16, 24, 40, 0.10);
+
+  --page-pad: 20px 22px;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text-primary);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+h1,h2,h3 { margin: 0; }
+a { color: inherit; text-decoration: none; }
+
+/* ---------- Shell ---------- */
+
+.appShell {
+  height: 100vh;
+  display: flex;
+  overflow: hidden;
+}
+
+.sidebar {
+  width: 270px;
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  padding: 14px;
+}
+
+.sidebarTop { padding: 4px; }
+
+.brand {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 12px;
+  padding: 10px 10px;
+  cursor: pointer;
+  transition: all .15s ease;
+}
+.brand:hover {
+  background: var(--surface-2);
+  border-color: var(--border);
+}
+
+.cl-logo {
+  width: 40px;
+  height: 40px;
+  border-radius: 12px;
+  background: linear-gradient(135deg, var(--accent), #3aa0ff);
+  box-shadow: 0 10px 18px rgba(0, 102, 255, .18);
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+}
+.cl-logoMark {
+  color: white;
+  font-weight: 900;
+  letter-spacing: -0.04em;
+  font-size: 18px;
+}
+
+.brandText { display: flex; flex-direction: column; line-height: 1.05; }
+.brandTitle { font-size: 14px; font-weight: 800; letter-spacing: -0.02em; }
+.brandSub { font-size: 12px; color: var(--text-secondary); font-weight: 600; margin-top: 2px; }
+
+.nav {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px 4px;
+}
+
+.navDivider {
+  height: 1px;
+  background: var(--border);
+  margin: 10px 6px;
+}
+
+.navItem {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 10px;
+  border-radius: 12px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: all .15s ease;
+}
+.navItem:hover {
+  background: var(--surface-2);
+  border-color: var(--border);
+}
+.navItemActive {
+  background: rgba(0, 102, 255, 0.08);
+  border-color: rgba(0, 102, 255, 0.22);
+  box-shadow: 0 0 0 3px var(--accent-glow);
+}
+
+.navIcon {
+  width: 28px;
+  height: 28px;
+  border-radius: 10px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  display: grid;
+  place-items: center;
+  color: var(--text-primary);
+}
+.navItemActive .navIcon {
+  background: rgba(0, 102, 255, 0.10);
+  border-color: rgba(0, 102, 255, 0.25);
+  color: var(--accent);
+}
+
+.navText { font-size: 13px; font-weight: 700; }
+
+/* used by Layout.tsx */
+.navTextWrap { display: flex; flex-direction: column; line-height: 1.1; }
+.navSub { margin-top: 2px; font-size: 12px; color: var(--text-secondary); font-weight: 600; }
+
+.mainCol {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.content {
+  flex: 1;
+  overflow: auto;
+  padding: var(--page-pad);
+}
+
+/* ---------- Generic UI ---------- */
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-sm);
+}
+
+.cardHeader {
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.cardTitle { font-size: 13px; font-weight: 900; letter-spacing: -0.01em; }
+.cardSub { font-size: 12px; color: var(--text-secondary); font-weight: 600; margin-top: 2px; }
+
+.cardBody { padding: 14px 16px; }
+
+.grid {
+  display: grid;
+  gap: 12px;
+}
+.gridKpis { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+@media (max-width: 1100px) { .gridKpis { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 640px) { .gridKpis { grid-template-columns: 1fr; } }
+
+.kpi {
+  padding: 14px 14px;
+  border-radius: 14px;
+  background: linear-gradient(180deg, rgba(0, 102, 255, 0.06), transparent);
+  border: 1px solid rgba(0, 102, 255, 0.14);
+}
+.kpiLabel { font-size: 12px; color: var(--text-secondary); font-weight: 800; text-transform: uppercase; letter-spacing: .06em; }
+.kpiValue { margin-top: 8px; font-size: 22px; font-weight: 950; letter-spacing: -0.03em; }
+.kpiMeta { margin-top: 6px; font-size: 12px; color: var(--text-secondary); font-weight: 650; }
+
+.row {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.btn {
+  height: 38px;
+  padding: 0 14px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-primary);
+  font-weight: 800;
+  font-size: 13px;
+  cursor: pointer;
+  transition: all .15s ease;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+.btn:hover { background: var(--surface-2); border-color: var(--border-active); }
+.btnPrimary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: white;
+  box-shadow: 0 10px 16px rgba(0, 102, 255, .14);
+}
+.btnPrimary:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+.btn:disabled { opacity: .55; cursor: not-allowed; }
+
+.input {
+  height: 38px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  padding: 0 12px;
+  font-weight: 700;
+  color: var(--text-primary);
+  outline: none;
+  min-width: 240px;
+}
+.input:focus { border-color: rgba(0,102,255,.35); box-shadow: 0 0 0 3px var(--accent-glow); }
+
+.select {
+  height: 38px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  padding: 0 12px;
+  font-weight: 800;
+  color: var(--text-primary);
+  outline: none;
+}
+.select:focus { border-color: rgba(0,102,255,.35); box-shadow: 0 0 0 3px var(--accent-glow); }
+
+/* Table */
+.tableWrap { overflow: auto; }
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.table th {
+  text-align: left;
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-weight: 900;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  background: linear-gradient(180deg, var(--surface-2), transparent);
+}
+.table td {
+  padding: 12px 12px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+}
+.table tr:hover td { background: rgba(0,0,0,0.015); }
+
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 12px; }
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border-radius: 999px;
+  font-weight: 900;
+  font-size: 12px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text-secondary);
+}
+.pillOk { background: var(--success-bg); border-color: rgba(16,185,129,.25); color: #0b6b4a; }
+.pillWarn { background: var(--warning-bg); border-color: rgba(245,158,11,.25); color: #7a4b00; }
+.pillBad { background: var(--danger-bg); border-color: rgba(239,68,68,.25); color: #7a0b0b; }
+
+.num { text-align: right; font-variant-numeric: tabular-nums; }
+
+/* ---------- Accessibility helpers ---------- */
+
+.srOnly {
+  position: absolute !important;
+  width: 1px !important;
+  height: 1px !important;
+  padding: 0 !important;
+  margin: -1px !important;
+  overflow: hidden !important;
+  clip: rect(0, 0, 0, 0) !important;
+  white-space: nowrap !important;
+  border: 0 !important;
+}
+
+/* ---------- Live indicator (Layout.tsx) ---------- */
+
+.dotLive {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--success);
+  box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.12);
+  animation: livePulse 1.6s ease-in-out infinite;
+}
+@keyframes livePulse {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.25); opacity: 0.65; }
+}
+
+/* ---------- Ansicht / Tenant Panel ---------- */
+
+.tenantPanel {
+  border: 1px solid var(--border);
+  background: linear-gradient(180deg, var(--surface-2), var(--surface));
+  border-radius: 14px;
+  padding: 10px;
+  box-shadow: var(--shadow-sm);
+}
+
+.tenantPanelHead {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.tenantPanelLabel {
+  font-size: 12px;
+  font-weight: 900;
+  color: var(--text-secondary);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.tenantPanelValue {
+  font-size: 12px;
+  font-weight: 900;
+  color: var(--text-primary);
+  padding: 4px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.6);
+}
+
+.tenantSegments {
+  display: flex;
+  gap: 6px;
+  padding: 4px;
+  border-radius: 14px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.tenantSegment {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid transparent;
+  background: transparent;
+  border-radius: 12px;
+  padding: 10px 10px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  font-weight: 900;
+  font-size: 13px;
+  color: var(--text-primary);
+  text-align: left;
+}
+
+.tenantSegment:hover {
+  background: var(--surface-2);
+  border-color: var(--border);
+}
+
+.tenantSegmentSub {
+  font-size: 11px;
+  font-weight: 800;
+  color: var(--text-secondary);
+}
+
+.tenantSegmentActive {
+  background: rgba(0, 102, 255, 0.08);
+  border-color: rgba(0, 102, 255, 0.22);
+  box-shadow: 0 0 0 3px var(--accent-glow);
+}
+
+.tenantPanelDesc {
+  margin-top: 10px;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-secondary);
+}
+
+.tenantPanelHint {
+  margin-top: 6px;
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--text-tertiary);
+}
+
+/* Select als Fallback: Desktop aus, Mobile an */
+.tenantSelect {
+  display: none;
+  width: 100%;
+  margin-top: 10px;
+  height: 38px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  padding: 0 12px;
+  font-weight: 800;
+  color: var(--text-primary);
+  outline: none;
+}
+.tenantSelect:focus {
+  border-color: rgba(0, 102, 255, 0.35);
+  box-shadow: 0 0 0 3px var(--accent-glow);
+}
+
+@media (max-width: 640px) {
+  .tenantSegments { display: none; }
+  .tenantSelect { display: block; }
+}
+
+/* ---------- Slide-Over & Toasts (compat with existing components) ---------- */
+
+.slide-over-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,0.35); z-index: 40; }
+.slide-over-panel {
+  position: fixed; top: 0; right: 0; bottom: 0;
+  width: 520px; max-width: 92vw;
+  background: var(--surface);
+  border-left: 1px solid var(--border);
+  box-shadow: -12px 0 32px rgba(16, 24, 40, 0.16);
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  animation: slideIn .22s ease-out;
+}
+@keyframes slideIn { from { transform: translateX(12px); opacity: .5; } to { transform: translateX(0); opacity: 1; } }
+
+.toast-container { position: fixed; bottom: 18px; right: 18px; display: flex; flex-direction: column; gap: 8px; z-index: 100; }
+.toast {
+  background: var(--surface);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-left-width: 4px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  min-width: 320px;
+  box-shadow: var(--shadow-md);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  animation: slideUp .18s ease-out;
+}
+.toast-success { border-left-color: var(--success); }
+.toast-error { border-left-color: var(--danger); }
+.toast-info { border-left-color: var(--accent); }
+@keyframes slideUp { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+
+.dropdownMenu {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  width: 220px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  box-shadow: var(--shadow-md);
+  padding: 6px;
+  z-index: 60;
+  animation: fadeIn .12s ease-out;
+}
+@keyframes fadeIn { from { opacity: 0; transform: translateY(-3px); } to { opacity: 1; transform: translateY(0); } }
+.dropdownItem {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 10px 12px;
+  font-size: 13px;
+  font-weight: 800;
+  color: var(--text-primary);
+  background: none;
+  border: none;
+  cursor: pointer;
+  border-radius: 12px;
+}
+.dropdownItem:hover { background: var(--surface-2); color: var(--accent); }
+.dropdownDivider { height: 1px; background: var(--border); margin: 6px 0; }
+/* ----------------------------
+   PowerBI-alike alias layer
+   (keine Refactors nötig)
+---------------------------- */
+
+/* Buttons: JSX nutzt btn-primary etc, CSS hat btnPrimary */
+.btn-primary { background: var(--accent); border-color: var(--accent); color: #fff; box-shadow: 0 10px 16px rgba(0, 102, 255, .14); }
+.btn-primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+
+.btn-secondary { background: var(--surface); border-color: var(--border); color: var(--text-primary); }
+.btn-secondary:hover { background: var(--surface-2); border-color: var(--border-active); }
+
+.btn-ghost { background: transparent; border-color: transparent; color: var(--text-secondary); }
+.btn-ghost:hover { background: var(--surface-2); border-color: var(--border); color: var(--text-primary); }
+
+/* KPI tiles: JSX nutzt kpi-label/value/note, CSS hat kpiLabel/Value/Meta */
+.kpi-label { font-size: 12px; color: var(--text-secondary); font-weight: 900; text-transform: uppercase; letter-spacing: .06em; }
+.kpi-value { margin-top: 8px; font-size: 24px; font-weight: 950; letter-spacing: -0.03em; color: var(--text-primary); }
+.kpi-note  { margin-top: 6px; font-size: 12px; color: var(--text-secondary); font-weight: 700; }
+
+/* PowerBI-like header + toolbar */
+.pbHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.pbTitle { font-size: 18px; font-weight: 950; letter-spacing: -0.02em; }
+.pbSubtitle { margin-top: 4px; font-size: 12px; font-weight: 700; color: var(--text-tertiary); }
+
+.pbToolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.pbDivider { height: 1px; background: var(--border); margin: 12px 0; }
+
+/* Card headers (PowerBI Visual Container) */
+.visualHeader {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+}
+.visualTitle { font-size: 13px; font-weight: 950; letter-spacing: -0.01em; }
+.visualMeta  { font-size: 12px; font-weight: 700; color: var(--text-tertiary); }
+
+.visualBody { padding: 12px 14px; }
+
+/* Chart container sizing (clean + consistent) */
+.chartBox { height: 340px; }
+@media (max-width: 1024px) { .chartBox { height: 320px; } }
+@media (max-width: 640px)  { .chartBox { height: 300px; } }
+
+/* Table polish */
+.tableCompact th, .tableCompact td { padding: 10px 12px; }
+.tableCompact th { font-size: 11px; }
+.tableCompact td { font-size: 13px; }
+
+/* Subtle “PowerBI grid” feel for Recharts container */
+.recharts-wrapper { font-variant-numeric: tabular-nums; }
+/* ----------------------------
+   PowerBI-like Tooltip + Legend
+---------------------------- */
+
+.pbTooltip {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  box-shadow: var(--shadow-md);
+  padding: 10px 12px;
+  min-width: 220px;
+}
+
+.pbTooltipTitle {
+  font-size: 12px;
+  font-weight: 950;
+  color: var(--text-primary);
+  letter-spacing: -0.01em;
+  margin-bottom: 8px;
+}
+
+.pbTooltipRow {
+  display: grid;
+  grid-template-columns: 12px 1fr auto;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+  font-size: 12px;
+  font-weight: 800;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.pbTooltipDot {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  border: 2px solid rgba(15, 23, 42, 0.15);
+  background: rgba(15, 23, 42, 0.25);
+}
+
+.pbTooltipValue {
+  color: var(--text-primary);
+  font-weight: 950;
+  justify-self: end;
+}
+
+.pbLegend {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+  align-items: center;
+  font-size: 12px;
+  font-weight: 850;
+  color: var(--text-secondary);
+}
+
+.pbLegendItem {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.pbLegendSwatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  border: 2px solid rgba(15,23,42,0.14);
+  background: rgba(15,23,42,0.25);
+}
+.pbHeaderLegend {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.pbHeaderLegendItem {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 850;
+  color: var(--text-secondary);
+}
+
+.pbHeaderLegendSwatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  border: 2px solid rgba(15,23,42,0.14);
+}
