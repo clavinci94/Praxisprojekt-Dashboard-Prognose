@@ -1,14 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, Dict
 import traceback
 
 import pandas as pd
 
 from app.services.datasets import discover_datasets
-from app.services.data_loader import load_daily_series_from_csv
+from app.services.data_loader import load_daily_weight_series
 
 
 
@@ -54,9 +53,8 @@ class SeriesStore:
                 )
                 continue
 
-            path = Path(ds.path)
             try:
-                s = load_daily_series_from_csv(path)
+                s = load_daily_weight_series(ds.key)
 
                 # normalize to pd.Series
                 s = pd.Series(s).copy()

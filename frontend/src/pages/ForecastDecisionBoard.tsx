@@ -1,5 +1,5 @@
 // src/pages/ForecastDecisionBoard.tsx
-import { useMemo, useState } from "react";
+import React, { useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   ResponsiveContainer,
@@ -16,7 +16,6 @@ import {
 import type { TooltipProps } from "recharts";
 
 import type { ModelKey } from "../api/forecasts";
-import { ApiError } from "../api/client";
 import { useForecastDashboardData, type WeeklyPoint } from "../hooks/useForecastDashboardData";
 
 /** ---------- Formatting ---------- */
@@ -34,21 +33,6 @@ function formatPct0to100(x: number | null | undefined) {
   if (x == null || !Number.isFinite(x)) return "—";
   return `${Math.round(x)}%`;
 }
-function errorToString(err: unknown) {
-  if (!err) return "Unbekannter Fehler";
-  if (typeof err === "string") return err;
-  if (err instanceof ApiError) {
-    const body = typeof err.body === "string" ? err.body : JSON.stringify(err.body);
-    return `API ${err.status}: ${body}`;
-  }
-  if (err instanceof Error) return `${err.name}: ${err.message}`;
-  try {
-    return JSON.stringify(err);
-  } catch {
-    return String(err);
-  }
-}
-
 /** ---------- Decision model (uses same constants) ---------- */
 const EFF = {
   hoursPerFteWeek: 40,
@@ -144,7 +128,6 @@ export default function ForecastDecisionBoard() {
     weekly,
     hasQuantiles,
     kpiMetrics,
-    loading,
     errors,
     datasetLabel,
     rangeLabel,
@@ -159,6 +142,10 @@ export default function ForecastDecisionBoard() {
     dailyErrorLimit: 0,
     outlierLimit: 0,
   });
+
+  React.useEffect(() => {
+    void loadAll();
+  }, [loadAll]);
 
   // ensure selectedWeek is valid once data arrives
   React.useEffect(() => {

@@ -5,9 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "dev:api": "cd Forecasting/backend && python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload",
-    "dev:worker": "cd Forecasting/backend && python -m app.run_worker",
-    "dev:all": "cross-env FORECAST_DATA_DIR=\"/Users/claudio/Desktop/Projekt Cargologic\" concurrently -k -n API,WORKER,UI -c auto \"npm run dev:api\" \"npm run dev:worker\" \"npm run dev\"",
+    "dev:api": "cd ../backend && python -m uvicorn app.main:app --app-dir src --host 127.0.0.1 --port 8080 --reload",
+    "dev:all": "cross-env CARGOLOGIC_DATA_DIR=\"/Users/claudio/Desktop/Projekt Cargologic\" concurrently -k -n API,UI -c auto \"npm run dev:api\" \"npm run dev\"",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "lint": "eslint ."

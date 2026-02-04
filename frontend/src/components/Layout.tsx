@@ -20,6 +20,7 @@ type Tenant = "clerion" | "Kunde";
 
 export function Layout({ children, active, onNavigate }: LayoutProps) {
   const [tenant, setTenant] = useState<Tenant>("Kunde");
+  const isMockMode = import.meta.env.VITE_USE_MOCKS === "true";
 
   const tenantMeta = useMemo(() => {
     if (tenant === "clerion") {
@@ -130,7 +131,7 @@ export function Layout({ children, active, onNavigate }: LayoutProps) {
         <div style={{ marginTop: "auto" }}>
           <div className="pill" style={{ marginTop: 12 }}>
             <span className="dotLive" aria-hidden="true" />
-            <div className="pillLabel">Live UI (Mock Data)</div>
+            <div className="pillLabel">{isMockMode ? "Live UI (Mock Data)" : "Live UI (Backend Data)"}</div>
           </div>
         </div>
       </aside>

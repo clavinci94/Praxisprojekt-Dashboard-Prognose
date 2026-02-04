@@ -37,7 +37,8 @@ export type SeriesRequest = ForecastRequest & {
 
 export type ActualPoint = {
   date: string;
-  value: number;
+  value?: number;
+  actual?: number;
 };
 
 export type ForecastPointWithBand = ForecastPoint & {

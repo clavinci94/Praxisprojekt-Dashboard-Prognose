@@ -12,6 +12,7 @@ import {
   XAxis,
   YAxis,
   Tooltip,
+  ReferenceLine,
 } from "recharts";
 import type { TooltipProps } from "recharts";
 
@@ -51,25 +52,55 @@ function errorToString(err: unknown) {
   }
 }
 
+function isoWeekKey(isoDate: string): string {
+  const d = new Date(`${String(isoDate).slice(0, 10)}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + 4 - (d.getUTCDay() || 7));
+  const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
+  const weekNo = Math.ceil((((d.getTime() - yearStart.getTime()) / 86400000) + 1) / 7);
+  return `${d.getUTCFullYear()}-W${String(weekNo).padStart(2, "0")}`;
+}
+
 /** ---------- Dataset list (NEW, minimal) ---------- */
 type DatasetKey = "export" | "import" | "tra_export" | "tra_import";
 type DatasetMeta = { key: string; data_from?: string; data_to?: string; points?: number };
 type DatasetsResponse = { available?: DatasetMeta[] };
 
+const DATASET_LABELS: Record<DatasetKey, string> = {
+  export: "Export (abgehend)",
+  import: "Import (eingehend)",
+  tra_export: "Transit Export",
+  tra_import: "Transit Import",
+};
+
+function formatDatasetLabel(k: string): string {
+  if ((k as DatasetKey) in DATASET_LABELS) return DATASET_LABELS[k as DatasetKey];
+  return k;
+}
+
+function formatMethodLabel(method?: string | null): string {
+  if (!method) return "—";
+  if (method === "xgb_walk_forward_1d") return "XGBoost Walk-Forward";
+  if (method === "xgb_recursive") return "XGBoost Rekursiv";
+  if (method === "naive_persistence_fallback") return "Fallback (Persistenz)";
+  return method;
+}
+
 async function fetchDatasets(): Promise<DatasetKey[]> {
   const res = await fetch("/api/datasets");
   if (!res.ok) throw new Error(`GET /api/datasets failed (${res.status})`);
-  const json = (await res.json()) as DatasetsResponse;
-  const keys = (json.available ?? [])
+  const json = (await res.json()) as DatasetsResponse | DatasetMeta[];
+  const list = Array.isArray(json) ? json : (json.available ?? []);
+  const keys = list
     .map((d) => d.key)
     .filter(Boolean) as string[];
 
   // Keep only our supported keys (prevents weird data)
   const allowed: DatasetKey[] = ["export", "import", "tra_export", "tra_import"];
   const filtered = keys.filter((k) => allowed.includes(k as DatasetKey)) as DatasetKey[];
+  const order: DatasetKey[] = ["export", "import", "tra_export", "tra_import"];
+  const sorted = (filtered.length ? filtered : allowed).sort((a, b) => order.indexOf(a) - order.indexOf(b));
 
-  // If backend returns nothing, fall back to all
-  return filtered.length ? filtered : allowed;
+  return sorted;
 }
 
 /** ---------- Staffing model (unverändert) ---------- */
@@ -210,6 +241,8 @@ function pbSeriesName(raw: string) {
       return "Savings Opportunity (Proxy)";
     case "abs_error":
       return "Abs Error";
+    case "error":
+      return "Abweichung";
     case "ape":
       return "APE";
     default:
@@ -324,11 +357,13 @@ export default function PowerBiForecastDashboard() {
   const [startDate, setStartDate] = useState<string>(new Date().toISOString().slice(0, 10));
   const [horizonDays, setHorizonDays] = useState<number>(28);
   const [historyDays, setHistoryDays] = useState<number>(90);
+  const [granularity, setGranularity] = useState<"weekly" | "daily">("weekly");
 
   const backtestDays = 56;
 
   const {
     isRunMode,
+    payload,
     weekly,
     hasQuantiles,
     kpiMetrics,
@@ -354,8 +389,63 @@ export default function PowerBiForecastDashboard() {
   const debugFromUrl = searchParams.get("debug") === "1";
   const [showDebug, setShowDebug] = useState<boolean>(debugFromUrl);
 
+  useEffect(() => {
+    void loadAll();
+  }, [loadAll]);
+
   const staffing = useMemo(() => makeStaffingTable(weekly), [weekly]);
   const savingsTotal = useMemo(() => staffing.reduce((a, r) => a + r.savingsCHF, 0), [staffing]);
+  const operationsData = useMemo(() => {
+    const byWeek = new Map(staffing.map((row) => [row.week, row]));
+    return weekly.map((w) => {
+      const s = byWeek.get(w.week);
+      return {
+        ...w,
+        planCostCHF: s?.planCostCHF ?? null,
+        opportunities: w.opportunities ?? 0,
+      };
+    });
+  }, [weekly, staffing]);
+
+  const dailyTrend = useMemo(() => {
+    const actuals = Array.isArray((payload as any)?.actuals) ? (payload as any).actuals : [];
+    const forecast = Array.isArray((payload as any)?.forecast) ? (payload as any).forecast : [];
+    const byDate = new Map<
+      string,
+      { date: string; week: string; actual: number | null; forecast: number | null; p05: number | null; p95: number | null }
+    >();
+
+    for (const a of actuals) {
+      const iso = String(a?.date ?? "").slice(0, 10);
+      const v = Number(a?.value ?? a?.actual);
+      if (!iso || !Number.isFinite(v)) continue;
+      const cur = byDate.get(iso) ?? { date: iso, week: isoWeekKey(iso), actual: null, forecast: null, p05: null, p95: null };
+      cur.actual = Math.max(0, v);
+      byDate.set(iso, cur);
+    }
+
+    for (const f of forecast) {
+      const iso = String(f?.date ?? "").slice(0, 10);
+      const y = Number(f?.forecast);
+      if (!iso || !Number.isFinite(y)) continue;
+      const cur = byDate.get(iso) ?? { date: iso, week: isoWeekKey(iso), actual: null, forecast: null, p05: null, p95: null };
+      cur.forecast = Math.max(0, y);
+      const p05 = Number(f?.p05);
+      const p95 = Number(f?.p95);
+      if (Number.isFinite(p05)) cur.p05 = Math.max(0, Math.min(p05, cur.forecast ?? p05));
+      if (Number.isFinite(p95)) cur.p95 = Math.max(cur.forecast ?? 0, p95);
+      byDate.set(iso, cur);
+    }
+
+    return Array.from(byDate.values()).sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+  }, [payload]);
+
+  const trendData = granularity === "daily" ? dailyTrend : weekly;
+  const trendXAxisKey = granularity === "daily" ? "date" : "week";
+  const forecastStartLabel = useMemo(() => {
+    if (granularity === "daily") return dailyTrend.find((d) => d.forecast != null)?.date ?? null;
+    return weekly.find((w) => w.forecast != null)?.week ?? null;
+  }, [granularity, dailyTrend, weekly]);
 
   const outliers = useMemo(() => {
     const xs = outlierDailyErrors ?? [];
@@ -368,13 +458,23 @@ export default function PowerBiForecastDashboard() {
     return scored.slice(0, 10);
   }, [outlierDailyErrors]);
 
+  const forecastTotal = useMemo(() => weekly.reduce((acc, w) => acc + (w.forecast ?? 0), 0), [weekly]);
+  const actualsTotal = useMemo(() => weekly.reduce((acc, w) => acc + (w.actual ?? 0), 0), [weekly]);
+  const datasetDisplayLabel = useMemo(() => {
+    if (datasetLabel) return formatDatasetLabel(String(datasetLabel));
+    return formatDatasetLabel(modelKey);
+  }, [datasetLabel, modelKey]);
+  const backtestMethod = useMemo(() => formatMethodLabel(kpiMetrics?.metrics?.method), [kpiMetrics]);
+
   const insights = useMemo<InsightCard[]>(() => {
     const cards: InsightCard[] = [];
 
     const mape = kpiMetrics?.metrics?.mape_pct ?? null;
+    const smape = kpiMetrics?.metrics?.smape_pct ?? null;
     const wape = kpiMetrics?.metrics?.wape_pct ?? null;
     const bias = kpiMetrics?.metrics?.bias_pct ?? null;
     const n = kpiMetrics?.metrics?.n ?? null;
+    const method = formatMethodLabel(kpiMetrics?.metrics?.method);
 
     if (mape != null || wape != null || bias != null) {
       const absBias = bias == null ? null : Math.abs(bias);
@@ -386,22 +486,24 @@ export default function PowerBiForecastDashboard() {
             : "bad";
 
       cards.push({
-        title: "Modellgüte (Backtest)",
+        title: "Prognosequalität",
         status,
         bullets: [
-          wape == null ? "WAPE: —" : `WAPE: ${wape.toFixed(2)}% (robuste Gesamtgüte)`,
-          mape == null ? "MAPE: —" : `MAPE: ${mape.toFixed(2)}% (typische Abweichung)`,
+          `Validierung: ${method}`,
+          wape == null ? "WAPE: —" : `WAPE: ${wape.toFixed(2)}% (Gesamtabweichung)`,
+          smape == null ? "sMAPE: —" : `sMAPE: ${smape.toFixed(2)}% (stabil bei kleinen Mengen)`,
+          mape == null ? "MAPE: —" : `MAPE: ${mape.toFixed(2)}% (Durchschnittsabweichung)`,
           bias == null
             ? "Bias: —"
-            : `Bias: ${bias.toFixed(2)}% (${bias > 0 ? "systematisch zu hoch" : "systematisch zu tief"})`,
-          n == null ? "Stützmenge: —" : `Stützmenge: n=${n} (Backtest-Fenster)`,
+            : `Bias: ${bias.toFixed(2)}% (${bias > 0 ? "tendenziell zu hoch" : "tendenziell zu tief"})`,
+          n == null ? "Vergleichstage: —" : `Vergleichstage: ${n}`,
         ],
         footnote:
           status === "good"
-            ? "Interpretation: stabil, keine auffällige Drift."
+            ? "Interpretation: Modell ist aktuell gut nutzbar."
             : status === "warn"
-              ? "Interpretation: brauchbar, aber mit relevanten Abweichungen – Monitoring empfohlen."
-              : "Interpretation: kritisch – Segmentierung/Feature-Update und Ausreißerbehandlung prüfen.",
+              ? "Interpretation: nutzbar, aber mit merklichen Schwankungen."
+              : "Interpretation: kritisch – bitte Ursachenanalyse und Modell-Update prüfen.",
       });
     }
 
@@ -419,17 +521,17 @@ export default function PowerBiForecastDashboard() {
         const avg = ratios.reduce((a, b) => a + b, 0) / ratios.length;
         const status: InsightCard["status"] = avg <= 0.12 ? "good" : avg <= 0.22 ? "warn" : "bad";
         cards.push({
-          title: "Forecast-Risiko (p05/p95 Bandbreite)",
+          title: "Unsicherheitsband",
           status,
           bullets: [
             `Ø Bandbreite: ${(avg * 100).toFixed(1)}% relativ zum Forecast`,
             status === "good"
-              ? "Band ist eng → hohe Planbarkeit."
+              ? "Enges Band -> gute Planbarkeit."
               : status === "warn"
-                ? "Mittlere Unsicherheit → Puffer in Planung berücksichtigen."
-                : "Hohe Unsicherheit → Ursachenanalyse / Segmentierung prüfen.",
+                ? "Mittlere Unsicherheit -> Puffer einplanen."
+                : "Hohe Unsicherheit -> Analyse der Treiber empfohlen.",
           ],
-          footnote: "Band wird nur angezeigt, wenn echte p05/p95 im Payload vorhanden sind.",
+          footnote: "Band sichtbar, wenn p05/p95 Daten vorhanden sind.",
         });
       }
     }
@@ -510,9 +612,9 @@ export default function PowerBiForecastDashboard() {
         <div className="cardBody">
           <div className="pbHeader">
             <div>
-              <div className="pbTitle">Executive Forecast Overview</div>
+              <div className="pbTitle">Prognose-Dashboard (PowerBI-Stil)</div>
               <div className="pbSubtitle">
-                {datasetLabel}
+                {datasetDisplayLabel}
                 {rangeLabel ? ` · ${rangeLabel}` : ""}
               </div>
               {datasetLoadError ? (
@@ -533,7 +635,7 @@ export default function PowerBiForecastDashboard() {
                   >
                     {availableKeys.map((k) => (
                       <option key={k} value={k}>
-                        {k}
+                        {formatDatasetLabel(k)}
                       </option>
                     ))}
                   </select>
@@ -584,13 +686,23 @@ export default function PowerBiForecastDashboard() {
                 disabled={loading.series || loading.kpis || !weekly?.length}
                 title={!weekly?.length ? "Bitte zuerst Daten laden" : "Öffnet Decision Board mit aktuellen Parametern"}
               >
-                Decision Board
+                Maßnahmenplan
               </button>
 
               <button className="btn" onClick={() => setShowDebug((s) => !s)} title="Debug-Overlay ein/aus">
                 Debug
               </button>
             </div>
+          </div>
+
+          <div className="row" style={{ marginTop: 12 }}>
+            <button className={granularity === "weekly" ? "btn btn-primary" : "btn"} onClick={() => setGranularity("weekly")}>
+              Wöchentlich
+            </button>
+            <button className={granularity === "daily" ? "btn btn-primary" : "btn"} onClick={() => setGranularity("daily")}>
+              Täglich
+            </button>
+            <span className="pill">Validierung: {backtestMethod}</span>
           </div>
 
           {combinedError ? (
@@ -612,11 +724,14 @@ export default function PowerBiForecastDashboard() {
       </div>
 
       {/* KPI Row */}
-      <div className="grid gridKpis" style={{ marginTop: 12 }}>
-        <KpiTile title="WAPE" value={formatPct2(kpiMetrics?.metrics?.wape_pct ?? null)} subtitle="Backtest" />
-        <KpiTile title="MAPE" value={formatPct2(kpiMetrics?.metrics?.mape_pct ?? null)} subtitle="Backtest" />
-        <KpiTile title="Bias" value={formatPct2(kpiMetrics?.metrics?.bias_pct ?? null)} subtitle="Backtest" />
-        <KpiTile title="Savings" value={formatMoney(Math.round(savingsTotal))} subtitle="CHF (Proxy)" />
+      <div className="grid" style={{ marginTop: 12, gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))" }}>
+        <KpiTile title="Prognose gesamt" value={formatKg(forecastTotal)} subtitle="aktueller Zeitraum" />
+        <KpiTile title="Ist gesamt" value={formatKg(actualsTotal)} subtitle="verfügbare Historie" />
+        <KpiTile title="WAPE" value={formatPct2(kpiMetrics?.metrics?.wape_pct ?? null)} subtitle="Gesamtabweichung" />
+        <KpiTile title="sMAPE" value={formatPct2(kpiMetrics?.metrics?.smape_pct ?? null)} subtitle="stabiler Vergleich" />
+        <KpiTile title="MAPE" value={formatPct2(kpiMetrics?.metrics?.mape_pct ?? null)} subtitle="durchschnittlich" />
+        <KpiTile title="Bias" value={formatPct2(kpiMetrics?.metrics?.bias_pct ?? null)} subtitle="Richtung der Abweichung" />
+        <KpiTile title="Sparpotenzial" value={formatMoney(Math.round(savingsTotal))} subtitle="CHF (Proxy)" />
       </div>
 
       {/* Insights */}
@@ -653,15 +768,20 @@ export default function PowerBiForecastDashboard() {
         <div className="card">
           <div className="visualHeader">
             <div>
-              <div className="visualTitle">Volume (kg)</div>
-              <div className="visualMeta">Actuals vs Forecast {hasQuantiles ? "· p05/p95 Band" : ""}</div>
+              <div className="visualTitle">Verlauf & Prognose</div>
+              <div className="visualMeta">
+                {granularity === "daily" ? "Tägliche Ansicht" : "Wöchentliche Aggregation"} · Ist vs Prognose{" "}
+                {hasQuantiles ? "· Konfidenzband" : ""}
+              </div>
             </div>
 
             <HeaderLegend
               items={[
-                { label: "Forecast", color: "var(--accent)", kind: "line" },
-                { label: "Actuals", color: "rgba(15,23,42,.55)", kind: "dash" },
-                ...(hasQuantiles ? [{ label: "p05–p95 Band", color: "rgba(0,102,255,.12)", kind: "fill" }] : []),
+                { label: "Ist", color: "#1f8ef1", kind: "line" as const },
+                { label: "Prognose", color: "rgba(71,85,105,.95)", kind: "line" as const },
+                ...(hasQuantiles
+                  ? [{ label: "Konfidenzband", color: "rgba(100,116,139,.16)", kind: "fill" as const }]
+                  : []),
               ]}
             />
           </div>
@@ -670,43 +790,52 @@ export default function PowerBiForecastDashboard() {
             <div className="chartBox">
               <ResponsiveContainer width="100%" height="100%">
                 <AreaChart
-                  data={weekly}
+                  data={trendData}
                   margin={{ top: 8, right: 16, left: 0, bottom: 0 }}
                   onClick={(e: any) => {
-                    const week = e?.activeLabel ?? e?.activePayload?.[0]?.payload?.week;
+                    const week = e?.activePayload?.[0]?.payload?.week ?? e?.activeLabel;
                     if (typeof week === "string" && week.length) goDecisionBoardForWeek(week, "p50");
                   }}
                   style={{ cursor: "pointer" }}
                 >
                   <CartesianGrid strokeDasharray="3 3" strokeOpacity={0.18} />
-                  <XAxis dataKey="week" tick={{ fontSize: 12 }} />
+                  <XAxis dataKey={trendXAxisKey} tick={{ fontSize: 12 }} />
                   <YAxis tick={{ fontSize: 12 }} />
                   <Tooltip content={<PbTooltip />} />
 
                   {hasQuantiles && showQuantiles && (
                     <>
-                      <Area type="monotone" dataKey="p95" name="p95" fill="rgba(0,102,255,.10)" stroke="none" />
-                      <Area type="monotone" dataKey="p05" name="p05" fill="rgba(0,102,255,.10)" stroke="none" />
+                      <Area type="monotone" dataKey="p95" name="p95" fill="rgba(100,116,139,.16)" stroke="none" />
+                      <Area type="monotone" dataKey="p05" name="p05" fill="rgba(100,116,139,.16)" stroke="none" />
                     </>
                   )}
 
                   <Line
                     type="monotone"
-                    dataKey="forecast"
-                    name="forecast"
-                    stroke="var(--accent)"
-                    strokeWidth={2}
+                    dataKey="actual"
+                    name="actual"
+                    stroke="#1f8ef1"
+                    strokeWidth={2.2}
+                    connectNulls
                     dot={false}
                   />
                   <Line
                     type="monotone"
-                    dataKey="actual"
-                    name="actual"
-                    stroke="rgba(15,23,42,.55)"
-                    strokeWidth={2}
-                    strokeDasharray="6 6"
+                    dataKey="forecast"
+                    name="forecast"
+                    stroke="rgba(71,85,105,.95)"
+                    strokeWidth={2.2}
+                    connectNulls
                     dot={false}
                   />
+                  {forecastStartLabel ? (
+                    <ReferenceLine
+                      x={forecastStartLabel}
+                      stroke="rgba(100,116,139,.7)"
+                      strokeDasharray="4 4"
+                      label={{ value: "Forecast Start", position: "insideTopRight", fill: "rgba(71,85,105,.8)", fontSize: 11 }}
+                    />
+                  ) : null}
                 </AreaChart>
               </ResponsiveContainer>
             </div>
@@ -717,26 +846,32 @@ export default function PowerBiForecastDashboard() {
         <div className="card">
           <div className="visualHeader">
             <div>
-              <div className="visualTitle">Operational Savings Opportunity</div>
+              <div className="visualTitle">Kosten & Sparpotenzial</div>
               <div className="visualMeta">
                 <span className="pill pillWarn" style={{ padding: "4px 8px", fontSize: 11 }}>
                   Proxy
                 </span>{" "}
-                aus Forecast (heuristisch)
+                aus Forecast- und Personalmodell
               </div>
             </div>
 
-            <HeaderLegend items={[{ label: "Savings Opportunity (Proxy)", color: "rgba(16,185,129,.55)", kind: "fill" }]} />
+            <HeaderLegend
+              items={[
+                { label: "Kosten (Proxy)", color: "rgba(245,158,11,.55)", kind: "fill" },
+                { label: "Sparpotenzial (Proxy)", color: "rgba(16,185,129,.55)", kind: "fill" },
+              ]}
+            />
           </div>
 
           <div className="visualBody">
             <div className="chartBox">
               <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={weekly} margin={{ top: 8, right: 16, left: 0, bottom: 0 }}>
+                <BarChart data={operationsData} margin={{ top: 8, right: 16, left: 0, bottom: 0 }}>
                   <CartesianGrid strokeDasharray="3 3" strokeOpacity={0.18} />
                   <XAxis dataKey="week" tick={{ fontSize: 12 }} />
                   <YAxis tick={{ fontSize: 12 }} />
                   <Tooltip content={<PbTooltip />} />
+                  <Bar dataKey="planCostCHF" name="planCostCHF" fill="rgba(245,158,11,.55)" />
                   <Bar
                     dataKey="opportunities"
                     name="opportunities"
@@ -758,8 +893,8 @@ export default function PowerBiForecastDashboard() {
       {outliers.length ? (
         <div className="card" style={{ marginTop: 12 }}>
           <div className="visualHeader">
-            <div className="visualTitle">Top Outlier Days</div>
-            <div className="visualMeta">sortiert nach APE (fallback abs_error)</div>
+            <div className="visualTitle">Auffällige Tage</div>
+            <div className="visualMeta">sortiert nach prozentualer Abweichung (APE)</div>
           </div>
 
           <div className="visualBody tableWrap">
@@ -794,9 +929,9 @@ export default function PowerBiForecastDashboard() {
       {/* Daily Errors */}
       <div className="card" style={{ marginTop: 12 }}>
         <div className="visualHeader">
-          <div className="visualTitle">Daily Errors</div>
+          <div className="visualTitle">Abweichung (Ist vs Prognose)</div>
           <div className="visualMeta">
-            Punkte: {chartDailyErrors?.length ?? 0} {loading.dailyErrors ? "· lädt…" : ""}
+            Tage: {chartDailyErrors?.length ?? 0} {loading.dailyErrors ? "· lädt…" : ""}
           </div>
         </div>
 
@@ -808,8 +943,9 @@ export default function PowerBiForecastDashboard() {
                 <XAxis dataKey="date" tick={{ fontSize: 12 }} />
                 <YAxis tick={{ fontSize: 12 }} />
                 <Tooltip content={<PbTooltip />} />
-                <Line type="monotone" dataKey="abs_error" name="abs_error" dot={false} stroke="rgba(15,23,42,.55)" />
-                <Line type="monotone" dataKey="ape" name="ape" dot={false} stroke="var(--accent)" />
+                <ReferenceLine y={0} stroke="rgba(100,116,139,.45)" />
+                <Line type="monotone" dataKey="error" name="error" dot={false} stroke="#1f8ef1" />
+                <Line type="monotone" dataKey="abs_error" name="abs_error" dot={false} stroke="rgba(71,85,105,.95)" />
               </LineChart>
             </ResponsiveContainer>
           </div>

@@ -1,6 +1,6 @@
 // src/mocks/mockApi.ts
 
-const USE_MOCKS = import.meta.env.VITE_USE_MOCKS === "true";
+export const USE_MOCKS = import.meta.env.VITE_USE_MOCKS === "true";
 
 export type MockRunStatus = "queued" | "running" | "success" | "failed" | "canceled";
 

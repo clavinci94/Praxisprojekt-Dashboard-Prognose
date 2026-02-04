@@ -2,49 +2,26 @@ from __future__ import annotations
 
 import json
 import os
-import sqlite3
 from datetime import date as date_type
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
+from datetime import timedelta
 from typing import Any, Dict, List, Literal, Optional
 
 import pandas as pd
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field, field_validator
 
+from app.ml.xgb_core import forecast_next_days
 from app.db import get_conn
-
+from app.services.data_loader import load_daily_weight_series
 
 router = APIRouter(prefix="/metrics", tags=["metrics"])
 
-
-# -----------------------------
-# Config (same assumptions as runs.py)
-# -----------------------------
-DEFAULT_DATA_DIR = Path(
-    os.getenv(
-        "CARGOLOGIC_DATA_DIR",
-        os.getenv("CL_DATA_DIR", str(Path.home() / "Desktop" / "Projekt Cargologic")),
-    )
-).expanduser()
-
-REQUIRED_FILES = [
-    "cl_export.csv",
-    "cl_import.csv",
-    "cl_tra_export.csv",
-    "cl_tra_import.csv",
-]
-REQUIRED_FILES = list(dict.fromkeys(REQUIRED_FILES))
-
-DATE_COL = os.getenv("CL_DATE_COL", "fl_gmt_departure_date")
-VALUE_COL = os.getenv("CL_VALUE_COL", "weight_sum")
+ModelKey = Literal["export", "import", "tra_export", "tra_import"]
 
 DEFAULT_BACKTEST_DAYS = int(os.getenv("CL_BACKTEST_DAYS", "56"))
 DEFAULT_HISTORY_DAYS = int(os.getenv("CL_HISTORY_DAYS", "90"))
-
-
-def now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+MIN_APE_DENOMINATOR = 1.0
+APE_FLOOR_FRACTION = 0.01
 
 
 def parse_iso_date(s: str) -> date_type:
@@ -55,53 +32,71 @@ def _safe_div(num: float, den: float) -> float:
     return num / den if den != 0 else 0.0
 
 
-def _resolve_csv_paths() -> List[Path]:
-    paths = [DEFAULT_DATA_DIR / fn for fn in REQUIRED_FILES]
-    missing = [str(p) for p in paths if not p.exists()]
-    if missing:
-        raise FileNotFoundError(
-            "Missing required CSV files:\n"
-            + "\n".join(missing)
-            + f"\n\nDATA_DIR is: {DEFAULT_DATA_DIR}\n"
-            + "Fix: set CARGOLOGIC_DATA_DIR (or CL_DATA_DIR) to the folder containing the four CSVs."
-        )
-    return paths
+def _normalize_daily_series(s: pd.Series) -> pd.Series:
+    out = pd.Series(s).copy()
+    out = pd.to_numeric(out, errors="coerce").fillna(0.0).clip(lower=0.0)
+    idx = pd.to_datetime(out.index)
+    if isinstance(idx, pd.DatetimeIndex) and idx.tz is not None:
+        idx = idx.tz_convert("UTC").tz_localize(None)
+    out.index = idx.normalize()
+    out = out.sort_index()
+    return out
 
 
-def load_daily_series_from_csvs() -> pd.DataFrame:
-    """Reads all 4 CSVs, concatenates, aggregates VALUE_COL per day.
-
-    Returns a DataFrame with columns:
-      - date (YYYY-MM-DD as str)
-      - value (float)
+def _ape_floor(actual_values: List[float]) -> float:
     """
-    paths = _resolve_csv_paths()
-    frames: List[pd.DataFrame] = []
-
-    for p in paths:
-        df = pd.read_csv(p)
-        if DATE_COL not in df.columns:
-            raise ValueError(f"CSV {p.name}: missing DATE_COL={DATE_COL}")
-        if VALUE_COL not in df.columns:
-            raise ValueError(f"CSV {p.name}: missing VALUE_COL={VALUE_COL}")
-
-        tmp = df[[DATE_COL, VALUE_COL]].copy()
-        tmp[DATE_COL] = pd.to_datetime(tmp[DATE_COL], errors="coerce", utc=True).dt.tz_convert(None)
-        tmp = tmp.dropna(subset=[DATE_COL])
-        tmp.rename(columns={DATE_COL: "date", VALUE_COL: "value"}, inplace=True)
-        frames.append(tmp)
-
-    all_df = pd.concat(frames, ignore_index=True)
-    daily = all_df.groupby("date", as_index=False)["value"].sum().sort_values("date")
-    daily["date"] = pd.to_datetime(daily["date"]).dt.date.astype(str)
-    daily["value"] = daily["value"].astype(float)
-    return daily
+    Dynamic floor for APE denominator.
+    Prevents meaningless 10,000%+ spikes on near-zero days.
+    """
+    nonzero = sorted(abs(v) for v in actual_values if abs(v) > 0.0)
+    if not nonzero:
+        return MIN_APE_DENOMINATOR
+    median = nonzero[len(nonzero) // 2]
+    return max(MIN_APE_DENOMINATOR, float(median) * APE_FLOOR_FRACTION)
 
 
-# -----------------------------
-# API Models
-# -----------------------------
-ModelKey = Literal["export", "import", "tra_export", "tra_import"]
+def _compute_ape(abs_error: float, actual: float, denominator_floor: float) -> Optional[float]:
+    if abs(actual) < denominator_floor:
+        return None
+    return abs_error / abs(actual)
+
+
+def _outlier_score(point: DailyErrorPoint) -> float:
+    return float(point.ape) if point.ape is not None else float(point.abs_error)
+
+
+def _predict_model_backtest(
+    model_key: str,
+    history_values: List[float],
+    date_index: List[pd.Timestamp],
+    actual_window: List[float],
+) -> tuple[List[float], str, Optional[str]]:
+    if not date_index:
+        return [], "xgb_walk_forward_1d", None
+    if len(date_index) != len(actual_window):
+        return [], "naive_persistence_fallback", "date_index and actual_window length mismatch"
+
+    try:
+        hist = [max(0.0, float(v)) for v in history_values]
+        if not hist:
+            hist = [0.0]
+        preds: List[float] = []
+        for ts, actual in zip(date_index, actual_window):
+            pts = forecast_next_days(
+                model_key=model_key,  # type: ignore[arg-type]
+                history_daily_y=hist,
+                start_date=ts.date().isoformat(),
+                horizon_days=1,
+            )
+            if not pts:
+                raise ValueError("empty forecast output")
+            pred = max(0.0, float(pts[0].get("forecast", 0.0)))
+            preds.append(pred)
+            # walk-forward: next day forecast sees the actual observed demand
+            hist.append(max(0.0, float(actual)))
+        return preds, "xgb_walk_forward_1d", None
+    except Exception as e:
+        return [], "naive_persistence_fallback", repr(e)
 
 
 class MetricsRequest(BaseModel):
@@ -120,59 +115,50 @@ class DailyErrorPoint(BaseModel):
     date: str
     actual: float
     forecast: float
-    error: float  # forecast - actual
+    error: float
     abs_error: float
-    ape: Optional[float] = None  # abs(error)/abs(actual) if actual!=0
+    ape: Optional[float] = None
 
 
 class MetricsResponse(BaseModel):
-    # one of these identifiers will be set
     run_id: Optional[str] = None
     model_key: str
-
     window: Dict[str, Any]
     metrics: Dict[str, Any]
     daily_errors: List[DailyErrorPoint]
-
-
-def _load_run_params_or_404(run_id: str) -> Dict[str, Any]:
-    with get_conn() as conn:
-        row = conn.execute("SELECT params_json FROM runs WHERE id = ?", (run_id,)).fetchone()
-    if not row:
-        raise HTTPException(status_code=404, detail="Run not found")
-    try:
-        return json.loads(row["params_json"]) if row["params_json"] else {}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Invalid params_json for run: {e}")
 
 
 def compute_naive_backtest_metrics(
     *,
     model_key: str,
     start_date: date_type,
+    series: pd.Series,
     backtest_days: int,
     include_daily_errors: bool,
     daily_errors_limit: int,
     outliers_only: bool,
 ) -> MetricsResponse:
-    """Walk-forward naive baseline over aggregated daily totals.
-
-    forecast(t) = last observed actual before t.
     """
-    if daily_errors_limit < 1 or daily_errors_limit > 3650:
-        raise HTTPException(status_code=400, detail="daily_errors_limit out of range (1..3650)")
+    Backtest metrics against historical actuals.
+    Uses recursive model forecast first; falls back to naive persistence if needed.
+    """
+    daily = _normalize_daily_series(series)
 
-    daily_df = load_daily_series_from_csvs()
-    daily_df["date_dt"] = pd.to_datetime(daily_df["date"])
-    daily_df = daily_df.sort_values("date_dt")
+    if daily.empty:
+        return MetricsResponse(
+            run_id=None,
+            model_key=model_key,
+            window={"from": None, "to": None, "backtest_days": backtest_days},
+            metrics={"n": 0, "mape_pct": None, "wape_pct": None, "bias_pct": None},
+            daily_errors=[],
+        )
 
-    win_to = start_date - timedelta(days=1)
-    win_from = start_date - timedelta(days=backtest_days)
+    requested_to = start_date - timedelta(days=1)
+    max_available = daily.index.max().date()
+    win_to = min(requested_to, max_available)
+    win_from = win_to - timedelta(days=max(1, backtest_days) - 1)
 
-    mask = (daily_df["date_dt"].dt.date >= win_from) & (daily_df["date_dt"].dt.date <= win_to)
-    window_df = daily_df.loc[mask, ["date_dt", "value"]].copy()
-
-    if window_df.empty:
+    if win_to < win_from:
         return MetricsResponse(
             run_id=None,
             model_key=model_key,
@@ -181,34 +167,56 @@ def compute_naive_backtest_metrics(
             daily_errors=[],
         )
 
-    hist_mask = daily_df["date_dt"].dt.date < win_from
-    hist_df = daily_df.loc[hist_mask, ["date_dt", "value"]]
-    prev = float(hist_df["value"].iloc[-1]) if len(hist_df) else 0.0
+    idx = pd.date_range(win_from, win_to, freq="D")
+    window = daily.reindex(idx, fill_value=0.0)
+    hist = daily[daily.index < idx[0]]
+    history_values = [float(v) for v in hist.values]
+    model_forecasts, method, method_error = _predict_model_backtest(
+        model_key=model_key,
+        history_values=history_values,
+        date_index=list(idx),
+        actual_window=[float(v) for v in window.values],
+    )
+    if not model_forecasts:
+        model_forecasts = []
+        prev = float(history_values[-1]) if history_values else 0.0
+        for value in window.values:
+            model_forecasts.append(max(0.0, prev))
+            prev = float(value)
 
     abs_pct_errors: List[float] = []
+    smape_terms: List[float] = []
     abs_errors: List[float] = []
     errors: List[float] = []
     sum_actual = 0.0
     daily_errors: List[DailyErrorPoint] = []
+    actual_values = [float(v) for v in window.values]
+    ape_floor = _ape_floor(actual_values)
+    zero_actual_days = 0
 
-    for _, r in window_df.iterrows():
-        dt = pd.to_datetime(r["date_dt"]).date().isoformat()
-        actual = float(r["value"])
-        forecast = max(0.0, prev)
+    for ts, value, forecast in zip(idx, window.values, model_forecasts):
+        actual = float(value)
+        forecast = max(0.0, float(forecast))
         err = forecast - actual
         ae = abs(err)
-        ape = (ae / abs(actual)) if actual != 0 else None
+        if actual == 0.0:
+            zero_actual_days += 1
+        ape = _compute_ape(ae, actual, ape_floor)
+        smape_den = abs(actual) + abs(forecast)
+        smape = (2.0 * ae / smape_den) if smape_den > 0 else None
 
         errors.append(err)
         abs_errors.append(ae)
         sum_actual += actual
         if ape is not None:
             abs_pct_errors.append(ape)
+        if smape is not None:
+            smape_terms.append(smape)
 
         if include_daily_errors:
             daily_errors.append(
                 DailyErrorPoint(
-                    date=dt,
+                    date=ts.date().isoformat(),
                     actual=actual,
                     forecast=forecast,
                     error=err,
@@ -217,23 +225,20 @@ def compute_naive_backtest_metrics(
                 )
             )
 
-        prev = actual
-
-    # post-process daily_errors
     if include_daily_errors:
         if outliers_only:
-
-            def score(x: DailyErrorPoint) -> float:
-                return float(x.ape) if x.ape is not None else float(x.abs_error)
-
-            daily_errors = sorted(daily_errors, key=score, reverse=True)[:daily_errors_limit]
+            daily_errors = sorted(
+                daily_errors,
+                key=lambda p: (-_outlier_score(p), -float(p.abs_error), p.date),
+            )[: max(1, daily_errors_limit)]
         else:
-            daily_errors = daily_errors[-daily_errors_limit:]
+            daily_errors = daily_errors[-max(1, daily_errors_limit) :]
     else:
         daily_errors = []
 
-    n = int(len(window_df))
+    n = int(len(window))
     mape = 100.0 * (sum(abs_pct_errors) / len(abs_pct_errors)) if abs_pct_errors else None
+    smape = 100.0 * (sum(smape_terms) / len(smape_terms)) if smape_terms else None
     wape = 100.0 * _safe_div(sum(abs_errors), sum_actual) if sum_actual != 0 else None
     bias = 100.0 * _safe_div(sum(errors), sum_actual) if sum_actual != 0 else None
 
@@ -243,7 +248,13 @@ def compute_naive_backtest_metrics(
         window={"from": win_from.isoformat(), "to": win_to.isoformat(), "backtest_days": backtest_days},
         metrics={
             "n": n,
+            "method": method,
+            "method_error": method_error,
+            "nonzero_actual_days": n - zero_actual_days,
+            "zero_actual_days": zero_actual_days,
+            "ape_denominator_floor": round(ape_floor, 2),
             "mape_pct": round(mape, 2) if mape is not None else None,
+            "smape_pct": round(smape, 2) if smape is not None else None,
             "wape_pct": round(wape, 2) if wape is not None else None,
             "bias_pct": round(bias, 2) if bias is not None else None,
         },
@@ -251,9 +262,6 @@ def compute_naive_backtest_metrics(
     )
 
 
-# -----------------------------
-# Routes
-# -----------------------------
 @router.post("/{model_key}", response_model=MetricsResponse)
 def metrics_live(
     model_key: ModelKey,
@@ -263,9 +271,15 @@ def metrics_live(
     outliers_only: bool = False,
 ) -> MetricsResponse:
     start = parse_iso_date(req.start_date)
+    try:
+        series = load_daily_weight_series(model_key, target_col="sum_weight")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to load data for '{model_key}': {e}")
+
     return compute_naive_backtest_metrics(
         model_key=model_key,
         start_date=start,
+        series=series,
         backtest_days=req.backtest_days,
         include_daily_errors=include_daily_errors,
         daily_errors_limit=daily_errors_limit,
@@ -281,23 +295,37 @@ def metrics_for_run(
     daily_errors_limit: int = 120,
     outliers_only: bool = False,
 ) -> MetricsResponse:
-    if backtest_days < 7 or backtest_days > 3650:
-        raise HTTPException(status_code=400, detail="backtest_days out of range (7..3650)")
+    with get_conn() as conn:
+        row = conn.execute("SELECT params_json FROM runs WHERE id = ?", (run_id,)).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Run not found")
 
-    params = _load_run_params_or_404(run_id)
-    model_key = str(params.get("model_key") or "export")
-    start_date_raw = params.get("start_date")
-    if not start_date_raw:
+    try:
+        params = json.loads(row["params_json"] or "{}")
+    except Exception:
+        raise HTTPException(status_code=500, detail="Failed to decode run params")
+
+    model_key = str(params.get("model_key") or "export").strip().lower()
+    start_raw = str(params.get("start_date") or "")
+    if model_key not in {"export", "import", "tra_export", "tra_import"}:
+        raise HTTPException(status_code=400, detail=f"Unsupported model_key in run: {model_key}")
+    if not start_raw:
         raise HTTPException(status_code=400, detail="Run has no start_date in params")
 
     try:
-        start_date = parse_iso_date(str(start_date_raw))
+        start_date = parse_iso_date(start_raw)
     except Exception:
-        raise HTTPException(status_code=500, detail="Run start_date is not ISO YYYY-MM-DD")
+        raise HTTPException(status_code=400, detail=f"Invalid run start_date: {start_raw}")
+
+    try:
+        series = load_daily_weight_series(model_key, target_col="sum_weight")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to load data for run: {e}")
 
     res = compute_naive_backtest_metrics(
         model_key=model_key,
         start_date=start_date,
+        series=series,
         backtest_days=backtest_days,
         include_daily_errors=include_daily_errors,
         daily_errors_limit=daily_errors_limit,

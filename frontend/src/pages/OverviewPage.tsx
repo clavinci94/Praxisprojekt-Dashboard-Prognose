@@ -3,7 +3,6 @@ import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   ResponsiveContainer,
-  AreaChart,
   Area,
   LineChart,
   Line,
@@ -57,10 +56,11 @@ type DatasetsResponse = { available?: DatasetMeta[] };
 async function fetchDatasets(): Promise<DatasetKey[]> {
   const res = await fetch("/api/datasets");
   if (!res.ok) throw new Error(`GET /api/datasets failed (${res.status})`);
-  const json = (await res.json()) as DatasetsResponse;
+  const json = (await res.json()) as DatasetsResponse | DatasetMeta[];
+  const list = Array.isArray(json) ? json : (json.available ?? []);
 
   const allowed: DatasetKey[] = ["export", "import", "tra_export", "tra_import"];
-  const keys = (json.available ?? []).map((d) => d.key).filter(Boolean) as string[];
+  const keys = list.map((d) => d.key).filter(Boolean) as string[];
   const filtered = keys.filter((k) => allowed.includes(k as DatasetKey)) as DatasetKey[];
   return filtered.length ? filtered : allowed;
 }

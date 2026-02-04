@@ -53,14 +53,3 @@ export type ForecastResponse = {
   kpis: ForecastKpi[];
   series: ForecastSeries[];
 };
-export type ForecastPoint = {
-  date: string;      // YYYY-MM-DD
-  forecast: number;  // float
-};
-
-export type ForecastResponse = {
-  model: string;
-  start_date: string;
-  horizon_days: number;
-  forecast: ForecastPoint[];
-};

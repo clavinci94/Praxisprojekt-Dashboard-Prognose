@@ -20,7 +20,13 @@ export type MetricsResponse = {
   };
   metrics: {
     n: number;
+    method?: string | null;
+    method_error?: string | null;
+    nonzero_actual_days?: number | null;
+    zero_actual_days?: number | null;
+    ape_denominator_floor?: number | null;
     mape_pct: number | null;
+    smape_pct?: number | null;
     wape_pct: number | null;
     bias_pct: number | null;
   };

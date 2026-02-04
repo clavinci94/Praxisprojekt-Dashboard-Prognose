@@ -14,6 +14,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field, field_validator
 
 from app.db import get_conn, init_db
+from app.services.data_loader import load_daily_weight_series
 
 router = APIRouter(prefix="/runs", tags=["runs"])
 
@@ -81,6 +82,21 @@ class RunParams(BaseModel):
     def _validate_start_date(cls, v: str) -> str:
         parse_iso_date(v)
         return v
+
+class DailyErrorPoint(BaseModel):
+    date: str
+    actual: float
+    forecast: float
+    error: float          # forecast - actual
+    abs_error: float
+    ape: Optional[float] = None  # abs(error)/abs(actual) if actual!=0
+
+class MetricsResponse(BaseModel):
+    run_id: str
+    model_key: str
+    window: Dict[str, Any]
+    metrics: Dict[str, Any]
+    daily_errors: List[DailyErrorPoint]
 
 
 class Run(BaseModel):
@@ -212,6 +228,16 @@ def load_daily_series_from_csvs() -> pd.DataFrame:
     return daily
 
 
+def load_daily_series_for_model(model_key: str) -> pd.DataFrame:
+    s = load_daily_weight_series(model_key, target_col="sum_weight")
+    idx = pd.to_datetime(s.index)
+    if isinstance(idx, pd.DatetimeIndex) and idx.tz is not None:
+        idx = idx.tz_convert("UTC").tz_localize(None)
+    out = pd.DataFrame({"date": idx.date.astype(str), "value": pd.to_numeric(s.values, errors="coerce")})
+    out["value"] = out["value"].fillna(0.0).astype(float)
+    return out.sort_values("date")
+
+
 def _continuous_daily(df: pd.DataFrame, start: date_type, end: date_type) -> pd.DataFrame:
     """Ensure continuous daily index between start..end. Missing days filled with 0.0."""
     if start > end:
@@ -243,7 +269,7 @@ def _normalize_params(req: CreateRunRequest) -> RunParams:
 
 
 def build_series_from_params(run_id: str, p: RunParams) -> SeriesResponse:
-    daily_df = load_daily_series_from_csvs()
+    daily_df = load_daily_series_for_model(p.model_key)
 
     start = parse_iso_date(p.start_date)
     actuals_end = start - timedelta(days=1)
@@ -369,9 +395,10 @@ def create_run(req: CreateRunRequest) -> Run:
     params = _normalize_params(req)
     params_json = json.dumps(params.model_dump(), ensure_ascii=False)
 
-    # Validate data access early so failures are visible as run status
+    # Validate data access early so failures are visible as run status.
+    # Model-specific load supports both 4-file mode and single-file override.
     try:
-        _resolve_csv_paths()
+        _ = load_daily_weight_series(params.model_key, target_col="sum_weight")
         status: RunStatus = "success"
         message = "Run created (series reproducible)."
         error = None
@@ -468,7 +495,7 @@ def get_run_metrics(run_id: str, backtest_days: int = 56) -> MetricsResponse:
     win_to = start - timedelta(days=1)
     win_from = start - timedelta(days=backtest_days)
 
-    daily_df = load_daily_series_from_csvs()
+    daily_df = load_daily_series_for_model(run.params.model_key)
     daily_df["date_dt"] = pd.to_datetime(daily_df["date"])
     daily_df = daily_df.sort_values("date_dt")
 

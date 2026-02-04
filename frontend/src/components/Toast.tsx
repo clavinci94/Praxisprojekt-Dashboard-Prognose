@@ -56,7 +56,7 @@ export function ToastContainer() {
     <div
       className={[
         "pointer-events-none fixed right-4 top-4 z-[60] flex w-[min(420px,calc(100vw-2rem))] flex-col gap-2",
-        hasToasts ? "opacity-100" : "opacity-0",
+        hasToasts ? "opacity-100" : "opacity-100",
       ].join(" ")}
       aria-live="polite"
       aria-relevant="additions"

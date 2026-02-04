@@ -6,6 +6,7 @@ import ExecutiveDashboard from "./pages/ExecutiveDashboard";
 import OverviewPage from "./pages/OverviewPage";
 import SettingsPage from "./pages/SettingsPage";
 import PowerBiForecastDashboard from "./pages/PowerBiForecastDashboard";
+import ForecastDecisionBoard from "./pages/ForecastDecisionBoard";
 
 export default function App() {
   const navigate = useNavigate();
@@ -31,6 +32,7 @@ export default function App() {
         <Route path="/" element={<ExecutiveDashboard />} />
         <Route path="/overview" element={<OverviewPage />} />
         <Route path="/forecast" element={<PowerBiForecastDashboard />} />
+        <Route path="/decision" element={<ForecastDecisionBoard />} />
         <Route path="/settings" element={<SettingsPage />} />
 
         <Route path="*" element={<ExecutiveDashboard />} />

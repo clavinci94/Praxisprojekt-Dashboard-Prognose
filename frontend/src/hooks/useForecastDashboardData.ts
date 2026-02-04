@@ -1,13 +1,9 @@
-// src/hooks/useForecastDashboardData.ts
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { ModelKey, SeriesResponse } from "../api/forecasts";
-import type { MetricsResponse, DailyErrorPoint } from "../api/metrics";
-import { ApiError } from "../api/client";
-
-/* =========================
-   helpers
-========================= */
+import { metricsApi, type DailyErrorPoint, type MetricsResponse } from "../api/metrics";
+import { apiGet, apiPost, ApiError } from "../api/client";
+import { runsApi } from "../api/runs";
 
 function addDaysIsoUTC(isoDate: string, days: number): string {
   const d = new Date(`${isoDate}T00:00:00Z`);
@@ -19,8 +15,8 @@ function errorToString(err: unknown) {
   if (!err) return "Unbekannter Fehler";
   if (typeof err === "string") return err;
   if (err instanceof ApiError) {
-    const body = typeof (err as any).body === "string" ? (err as any).body : JSON.stringify((err as any).body);
-    return `API ${(err as any).status}: ${body}`;
+    const body = typeof err.body === "string" ? err.body : JSON.stringify(err.body);
+    return `API ${err.status}: ${body}`;
   }
   if (err instanceof Error) return `${err.name}: ${err.message}`;
   try {
@@ -34,73 +30,79 @@ function clamp(n: number, lo: number, hi: number) {
   return Math.max(lo, Math.min(hi, n));
 }
 
-async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(url, init);
-  if (!res.ok) {
-    let body: any = null;
-    try {
-      body = await res.json();
-    } catch {
-      try {
-        body = await res.text();
-      } catch {
-        body = null;
-      }
-    }
-    throw new ApiError(res.status, body);
-  }
-  return (await res.json()) as T;
+function clip0(n: number) {
+  if (!Number.isFinite(n)) return 0;
+  return Math.max(0, n);
+}
+
+function isoWeekKey(isoDate: string): string {
+  const d = new Date(`${String(isoDate).slice(0, 10)}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + 4 - (d.getUTCDay() || 7));
+  const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
+  const weekNo = Math.ceil((((d.getTime() - yearStart.getTime()) / 86400000) + 1) / 7);
+  return `${d.getUTCFullYear()}-W${String(weekNo).padStart(2, "0")}`;
 }
 
 type LegacyActualPoint = { date: string; actual?: number; value?: number };
-
-async function fetchLegacyActuals(modelKey: string): Promise<Array<{ date: string; actual: number }>> {
-  const arr = await fetchJson<LegacyActualPoint[]>(`/api/actuals/${encodeURIComponent(modelKey)}`);
-  return (Array.isArray(arr) ? arr : [])
-    .map((p) => ({
-      date: String((p as any)?.date ?? "").slice(0, 10),
-      actual: Number((p as any)?.value ?? (p as any)?.actual),
-    }))
-    .filter((p) => p.date && Number.isFinite(p.actual));
-}
-
-
-
-type ForecastApiResponse = {
-  model?: string;
-  start_date?: string;
-  horizon_days?: number;
+type LegacyForecastResponse = {
   forecast: Array<{ date: string; forecast: number; p05?: number | null; p95?: number | null }>;
 };
 
-async function fetchForecast(modelKey: string, startDate: string, horizonDays: number): Promise<ForecastApiResponse> {
-  return await fetchJson<ForecastApiResponse>(`/api/forecast/${encodeURIComponent(modelKey)}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ start_date: startDate, horizon_days: horizonDays }),
+async function loadSeriesLive(modelKey: string, startDate: string, horizonDays: number, historyDays: number) {
+  const endDate = addDaysIsoUTC(startDate, Math.max(1, horizonDays) - 1);
+  return apiPost<SeriesResponse>(`/series/${encodeURIComponent(modelKey)}`, {
+    start_date: startDate,
+    end_date: endDate,
+    history_days: historyDays,
+    include_quantiles: true,
   });
 }
 
-async function fetchRunSeries(runId: string): Promise<SeriesResponse> {
-  return await fetchJson<SeriesResponse>(`/api/runs/${encodeURIComponent(runId)}/series`);
-}
+async function loadSeriesLegacy(modelKey: string, startDate: string, horizonDays: number, historyDays: number) {
+  const [actualsRes, forecastRes] = await Promise.allSettled([
+    apiGet<LegacyActualPoint[]>(`/actuals/${encodeURIComponent(modelKey)}`),
+    apiPost<LegacyForecastResponse>(`/forecast/${encodeURIComponent(modelKey)}`, {
+      start_date: startDate,
+      horizon_days: horizonDays,
+    }),
+  ]);
 
-async function fetchRunMetrics(runId: string): Promise<MetricsResponse> {
-  return await fetchJson<MetricsResponse>(`/api/metrics/runs/${encodeURIComponent(runId)}`);
-}
+  const actualsRaw = actualsRes.status === "fulfilled" ? actualsRes.value : [];
+  const forecastRaw = forecastRes.status === "fulfilled" ? forecastRes.value : { forecast: [] };
 
-function sliceHistory(actuals: Array<{ date: string; actual: number }>, startDate: string, historyDays: number) {
+  if (actualsRes.status !== "fulfilled" && forecastRes.status !== "fulfilled") {
+    throw new Error(
+      `Legacy fallback failed. actuals=${errorToString(actualsRes.reason)} forecast=${errorToString(forecastRes.reason)}`
+    );
+  }
+
   const startTs = new Date(`${startDate}T00:00:00Z`).getTime();
-  const filtered = actuals.filter((p) => new Date(`${p.date}T00:00:00Z`).getTime() < startTs);
-  return filtered.slice(Math.max(0, filtered.length - Math.max(0, historyDays)));
+  const normalizedActuals = (Array.isArray(actualsRaw) ? actualsRaw : [])
+    .map((p) => ({
+      date: String(p?.date ?? "").slice(0, 10),
+      actual: Number(p?.actual ?? p?.value),
+    }))
+    .filter((p) => p.date && Number.isFinite(p.actual))
+    .filter((p) => new Date(`${p.date}T00:00:00Z`).getTime() < startTs);
+  const actuals = normalizedActuals.slice(Math.max(0, normalizedActuals.length - Math.max(0, historyDays)));
+
+  return {
+    actuals,
+    forecast: Array.isArray(forecastRaw?.forecast) ? forecastRaw.forecast : [],
+    meta: {
+      dataset: modelKey,
+      mode: "legacy",
+      actuals_from: actuals.length ? actuals[0].date : undefined,
+      actuals_to: actuals.length ? actuals[actuals.length - 1].date : undefined,
+      forecast_from: startDate,
+      forecast_to: addDaysIsoUTC(startDate, Math.max(1, horizonDays) - 1),
+    },
+  } as SeriesResponse;
 }
-
-
-/* ----------------------------- types ----------------------------- */
 
 export type WeeklyPoint = {
-  week: string; // ISO week key (YYYY-Www)
-  iso: string; // first date in that week (ISO, YYYY-MM-DD)
+  week: string;
+  iso: string;
   actual: number | null;
   forecast: number | null;
   p05: number | null;
@@ -118,26 +120,12 @@ export type StaffingRow = {
   savingsCHF: number;
 };
 
-function clip0(n: number) {
-  if (!Number.isFinite(n)) return 0;
-  return Math.max(0, n);
-}
-
-// ISO week key helper (YYYY-Www) stable across year boundaries
-function isoWeekKey(isoDate: string): string {
-  const d = new Date(`${String(isoDate).slice(0, 10)}T00:00:00Z`);
-  d.setUTCDate(d.getUTCDate() + 4 - (d.getUTCDay() || 7));
-  const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
-  const weekNo = Math.ceil((((d.getTime() - yearStart.getTime()) / 86400000) + 1) / 7);
-  const yyyy = d.getUTCFullYear();
-  const ww = String(weekNo).padStart(2, "0");
-  return `${yyyy}-W${ww}`;
-}
+type LoadingState = { series: boolean; kpis: boolean; dailyErrors: boolean; outliers: boolean };
+type ErrorState = { series?: string; kpis?: string; dailyErrors?: string; outliers?: string };
 
 function parseSeriesToWeeklyPoints(payload: SeriesResponse): WeeklyPoint[] {
   const actualsArr: any[] = Array.isArray((payload as any)?.actuals) ? (payload as any).actuals : [];
   const forecastArr: any[] = Array.isArray((payload as any)?.forecast) ? (payload as any).forecast : [];
-
   if (actualsArr.length === 0 && forecastArr.length === 0) return [];
 
   type Daily = {
@@ -148,16 +136,15 @@ function parseSeriesToWeeklyPoints(payload: SeriesResponse): WeeklyPoint[] {
     p05: number | null;
     p95: number | null;
   };
-
   const daily: Daily[] = [];
 
   for (const a of actualsArr) {
-    const iso = a?.date ?? null;
+    const iso = String(a?.date ?? "").slice(0, 10);
     if (!iso) continue;
-    const v = a?.actual ?? null;
+    const v = a?.value ?? a?.actual;
     daily.push({
-      iso: String(iso).slice(0, 10),
-      week: isoWeekKey(String(iso)),
+      iso,
+      week: isoWeekKey(iso),
       actual: v == null ? null : clip0(Number(v)),
       forecast: null,
       p05: null,
@@ -166,19 +153,29 @@ function parseSeriesToWeeklyPoints(payload: SeriesResponse): WeeklyPoint[] {
   }
 
   for (const f of forecastArr) {
-    const iso = f?.date ?? null;
+    const iso = String(f?.date ?? "").slice(0, 10);
     if (!iso) continue;
-    const y = f?.forecast ?? null;
-    const p05 = f?.p05 ?? null;
-    const p95 = f?.p95 ?? null;
+    const y = f?.forecast == null ? null : clip0(Number(f.forecast));
+    const p05Raw = f?.p05 == null ? null : clip0(Number(f.p05));
+    const p95Raw = f?.p95 == null ? null : clip0(Number(f.p95));
+
+    let p05 = p05Raw;
+    let p95 = p95Raw;
+    if (y != null && Number.isFinite(y)) {
+      // keep visual bands stable even if backend quantile models are noisy
+      const bandBase = Math.max(1000, y, 1);
+      if (p05 != null) p05 = Math.min(Math.max(0, p05), y);
+      if (p95 != null) p95 = Math.max(y, Math.min(p95, bandBase * 3.0));
+      if (p05 != null && p95 != null && p05 > p95) p05 = Math.min(y, p95);
+    }
 
     daily.push({
-      iso: String(iso).slice(0, 10),
-      week: isoWeekKey(String(iso)),
+      iso,
+      week: isoWeekKey(iso),
       actual: null,
-      forecast: y == null ? null : clip0(Number(y)),
-      p05: p05 == null ? null : clip0(Number(p05)),
-      p95: p95 == null ? null : clip0(Number(p95)),
+      forecast: y,
+      p05,
+      p95,
     });
   }
 
@@ -198,8 +195,7 @@ function parseSeriesToWeeklyPoints(payload: SeriesResponse): WeeklyPoint[] {
   >();
 
   for (const d of daily) {
-    const k = d.week;
-    const cur = byWeek.get(k) ?? {
+    const cur = byWeek.get(d.week) ?? {
       firstIso: d.iso,
       actualSum: 0,
       actualCount: 0,
@@ -210,9 +206,7 @@ function parseSeriesToWeeklyPoints(payload: SeriesResponse): WeeklyPoint[] {
       p95Sum: 0,
       p95Count: 0,
     };
-
     if (d.iso < cur.firstIso) cur.firstIso = d.iso;
-
     if (d.actual != null) {
       cur.actualSum += d.actual;
       cur.actualCount += 1;
@@ -229,19 +223,25 @@ function parseSeriesToWeeklyPoints(payload: SeriesResponse): WeeklyPoint[] {
       cur.p95Sum += d.p95;
       cur.p95Count += 1;
     }
-
-    byWeek.set(k, cur);
+    byWeek.set(d.week, cur);
   }
 
   return Array.from(byWeek.entries())
-    .map(([week, v]) => ({
-      week,
-      iso: v.firstIso,
-      actual: v.actualCount ? v.actualSum : null,
-      forecast: v.forecastCount ? v.forecastSum : null,
-      p05: v.p05Count ? v.p05Sum : null,
-      p95: v.p95Count ? v.p95Sum : null,
-    }))
+    .map(([week, v]) => {
+      const forecast = v.forecastCount ? v.forecastSum : null;
+      const actual = v.actualCount ? v.actualSum : null;
+      const opportunitiesBase = forecast != null ? forecast : (actual ?? null);
+      const opportunities = opportunitiesBase != null ? Math.max(0, opportunitiesBase * 0.05) : null;
+      return {
+        week,
+        iso: v.firstIso,
+        actual,
+        forecast,
+        p05: v.p05Count ? v.p05Sum : null,
+        p95: v.p95Count ? v.p95Sum : null,
+        opportunities,
+      };
+    })
     .sort((a, b) => (a.week < b.week ? -1 : a.week > b.week ? 1 : 0));
 }
 
@@ -250,20 +250,22 @@ function makeStaffingTable(weekly: WeeklyPoint[]): StaffingRow[] {
   const BASE_FTE = 10;
   const CHF_PER_FTE_WEEK = 2500;
 
-  return (weekly ?? []).map((w) => {
+  return weekly.map((w) => {
     const y = w.forecast ?? 0;
     const fteNeeded = y > 0 ? y / KG_PER_FTE_WEEK : 0;
     const baseFte = BASE_FTE;
     const utilizationPct = baseFte > 0 ? clamp((fteNeeded / baseFte) * 100, 0, 250) : 0;
-
     const unused = Math.max(0, baseFte - fteNeeded);
-    const savingsCHF = unused * CHF_PER_FTE_WEEK;
-
-    return { week: w.week, forecastKg: y, fteNeeded, utilizationPct, baseFte, savingsCHF };
+    return {
+      week: w.week,
+      forecastKg: y,
+      fteNeeded,
+      utilizationPct,
+      baseFte,
+      savingsCHF: unused * CHF_PER_FTE_WEEK,
+    };
   });
 }
-
-/* ----------------------------- hook ----------------------------- */
 
 export function useForecastDashboardData({
   runId,
@@ -290,22 +292,26 @@ export function useForecastDashboardData({
   const [weekly, setWeekly] = useState<WeeklyPoint[]>([]);
   const [hasQuantiles, setHasQuantiles] = useState(false);
 
-  // kept for UI compatibility but not loaded from API anymore
   const [kpiMetrics, setKpiMetrics] = useState<MetricsResponse | null>(null);
   const [chartDailyErrors, setChartDailyErrors] = useState<DailyErrorPoint[]>([]);
   const [outlierDailyErrors, setOutlierDailyErrors] = useState<DailyErrorPoint[]>([]);
 
-  const [loading, setLoading] = useState({ series: false, kpis: false, dailyErrors: false, outliers: false });
-  const [errors, setErrors] = useState<{ series?: string; kpis?: string; dailyErrors?: string; outliers?: string }>({});
+  const [loading, setLoading] = useState<LoadingState>({ series: false, kpis: false, dailyErrors: false, outliers: false });
+  const [errors, setErrors] = useState<ErrorState>({});
+  const requestIdRef = useRef(0);
 
   const staffing = useMemo(() => makeStaffingTable(weekly), [weekly]);
-  const savingsTotal = useMemo(() => staffing.reduce((a, r) => a + r.savingsCHF, 0), [staffing]);
+  const savingsTotal = useMemo(() => staffing.reduce((acc, row) => acc + row.savingsCHF, 0), [staffing]);
 
   const outliers = useMemo(() => {
-    const xs: DailyErrorPoint[] = (outlierDailyErrors ?? []) as any;
-    return xs
-      .map((d) => ({ ...d, score: (d as any).ape != null ? (d as any).ape : (d as any).abs_error ?? 0 }))
-      .sort((a, b) => ((b as any).score ?? 0) - ((a as any).score ?? 0))
+    return [...(outlierDailyErrors ?? [])]
+      .sort((a, b) => {
+        const scoreA = a.ape != null ? Number(a.ape) : Number(a.abs_error ?? 0);
+        const scoreB = b.ape != null ? Number(b.ape) : Number(b.abs_error ?? 0);
+        if (scoreB !== scoreA) return scoreB - scoreA;
+        if (b.abs_error !== a.abs_error) return b.abs_error - a.abs_error;
+        return String(a.date).localeCompare(String(b.date));
+      })
       .slice(0, 10);
   }, [outlierDailyErrors]);
 
@@ -321,102 +327,124 @@ export function useForecastDashboardData({
   }, [payload]);
 
   const loadAll = useCallback(async () => {
+    const requestId = ++requestIdRef.current;
+    const isStale = () => requestId !== requestIdRef.current;
+    const applyMetricResult = (
+      result: PromiseSettledResult<MetricsResponse>,
+      key: "kpis" | "dailyErrors" | "outliers",
+      onSuccess: (data: MetricsResponse) => void,
+      onFailure: () => void
+    ) => {
+      if (result.status === "fulfilled") {
+        onSuccess(result.value);
+        setErrors((prev) => ({ ...prev, [key]: undefined }));
+      } else {
+        onFailure();
+        setErrors((prev) => ({ ...prev, [key]: errorToString(result.reason) }));
+      }
+    };
+
     setErrors({});
     setLoading({ series: true, kpis: false, dailyErrors: false, outliers: false });
-
-    // reset optional layers
     setKpiMetrics(null);
     setChartDailyErrors([]);
     setOutlierDailyErrors([]);
 
+    let seriesOk = false;
     try {
+      let res: SeriesResponse;
+
       if (runId) {
-        const res = await fetchRunSeries(runId);
-        setPayload(res as any);
+        try {
+          res = (await runsApi.getSeries(runId)) as unknown as SeriesResponse;
+        } catch {
+          res = await loadSeriesLive(String(modelKey), startDate, horizonDays, historyDays);
+        }
       } else {
-        const [actualsAll, fc] = await Promise.all([
-          fetchLegacyActuals(String(modelKey)),
-          fetchForecast(String(modelKey), startDate, horizonDays),
-        ]);
-
-        const actuals = sliceHistory(actualsAll, startDate, historyDays);
-
-        const merged: SeriesResponse = {
-          actuals,
-          forecast: Array.isArray(fc?.forecast) ? fc.forecast : [],
-          meta: {
-            dataset: String(modelKey),
-            mode: "live",
-            actuals_from: actuals.length ? actuals[0].date : undefined,
-            actuals_to: actuals.length ? actuals[actuals.length - 1].date : undefined,
-            forecast_from: startDate,
-            forecast_to: addDaysIsoUTC(startDate, Math.max(1, horizonDays) - 1),
-          } as any,
-        } as any;
-
-        setPayload(merged);
+        try {
+          res = await loadSeriesLive(String(modelKey), startDate, horizonDays, historyDays);
+        } catch {
+          res = await loadSeriesLegacy(String(modelKey), startDate, horizonDays, historyDays);
+        }
       }
-      setErrors((e) => ({ ...e, series: undefined }));
+
+      setPayload(res);
+      setErrors((prev) => ({ ...prev, series: undefined }));
+      seriesOk = true;
     } catch (err) {
       setPayload(null);
-      setErrors((e) => ({ ...e, series: errorToString(err) }));
+      setErrors((prev) => ({ ...prev, series: errorToString(err) }));
     } finally {
-      setLoading((s) => ({ ...s, series: false }));
+      setLoading((prev) => ({ ...prev, series: false }));
     }
-    // Optional: metrics are available for run mode via /api/metrics/runs/{run_id}
+
+    if (isStale()) return;
+
+    if (!seriesOk) {
+      setLoading((prev) => ({ ...prev, kpis: false, dailyErrors: false, outliers: false }));
+      return;
+    }
+
+    setLoading((prev) => ({ ...prev, kpis: true, dailyErrors: true, outliers: true }));
+
+    const dailyLimit = Math.max(1, dailyErrorLimit);
+    const outlierTop = Math.max(1, outlierLimit);
+
     if (runId) {
-      setLoading((s) => ({ ...s, kpis: true, dailyErrors: true, outliers: true }));
-      try {
-        const mr = await fetchRunMetrics(runId);
-        setKpiMetrics(mr ?? null);
+      const [kpiRes, dailyRes, outlierRes] = await Promise.allSettled([
+        metricsApi.getRunMetrics(runId, { backtestDays, includeDailyErrors: false }),
+        metricsApi.getRunMetrics(runId, {
+          backtestDays,
+          includeDailyErrors: true,
+          dailyErrorsLimit: dailyLimit,
+          outliersOnly: false,
+        }),
+        metricsApi.getRunMetrics(runId, {
+          backtestDays,
+          includeDailyErrors: true,
+          dailyErrorsLimit: outlierTop,
+          outliersOnly: true,
+        }),
+      ]);
 
-        const daily = Array.isArray((mr as any)?.daily_errors)
-          ? ((mr as any).daily_errors as DailyErrorPoint[])
-          : [];
-
-        const limited = dailyErrorLimit > 0 ? daily.slice(0, dailyErrorLimit) : daily;
-        setChartDailyErrors(limited);
-
-        // outliers: highest APE (fallback abs_error / error)
-        const scored = daily
-          .map((d: any) => ({
-            ...d,
-            __score:
-              d?.ape != null
-                ? Number(d.ape)
-                : d?.abs_error != null
-                  ? Number(d.abs_error)
-                  : d?.error != null
-                    ? Math.abs(Number(d.error))
-                    : 0,
-          }))
-          .sort((a: any, b: any) => (b.__score ?? 0) - (a.__score ?? 0));
-
-        const out = outlierLimit > 0 ? scored.slice(0, outlierLimit) : scored.slice(0, 50);
-        setOutlierDailyErrors(out as any);
-
-        setErrors((e) => ({ ...e, kpis: undefined, dailyErrors: undefined, outliers: undefined }));
-      } catch (err) {
-        const msg = errorToString(err);
-        setErrors((e) => ({ ...e, kpis: msg, dailyErrors: msg, outliers: msg }));
-        setKpiMetrics(null);
-        setChartDailyErrors([]);
-        setOutlierDailyErrors([]);
-      } finally {
-        setLoading((s) => ({ ...s, kpis: false, dailyErrors: false, outliers: false }));
-      }
+      if (isStale()) return;
+      applyMetricResult(kpiRes, "kpis", (x) => setKpiMetrics(x), () => setKpiMetrics(null));
+      applyMetricResult(dailyRes, "dailyErrors", (x) => setChartDailyErrors(x.daily_errors ?? []), () => setChartDailyErrors([]));
+      applyMetricResult(outlierRes, "outliers", (x) => setOutlierDailyErrors(x.daily_errors ?? []), () => setOutlierDailyErrors([]));
     } else {
-      // Live mode: backend does not expose metrics without a run id.
-      setKpiMetrics(null);
-      setChartDailyErrors([]);
-      setOutlierDailyErrors([]);
-      setErrors((e) => ({ ...e, kpis: undefined, dailyErrors: undefined, outliers: undefined }));
-      setLoading((s) => ({ ...s, kpis: false, dailyErrors: false, outliers: false }));
+      const req = {
+        start_date: startDate,
+        history_days: Math.max(1, historyDays),
+        backtest_days: Math.max(7, backtestDays),
+      };
+
+      const [kpiRes, dailyRes, outlierRes] = await Promise.allSettled([
+        metricsApi.getLiveMetrics(String(modelKey), req, {
+          includeDailyErrors: false,
+          backtestDays,
+        }),
+        metricsApi.getLiveMetrics(String(modelKey), req, {
+          includeDailyErrors: true,
+          dailyErrorsLimit: dailyLimit,
+          outliersOnly: false,
+          backtestDays,
+        }),
+        metricsApi.getLiveMetrics(String(modelKey), req, {
+          includeDailyErrors: true,
+          dailyErrorsLimit: outlierTop,
+          outliersOnly: true,
+          backtestDays,
+        }),
+      ]);
+
+      if (isStale()) return;
+      applyMetricResult(kpiRes, "kpis", (x) => setKpiMetrics(x), () => setKpiMetrics(null));
+      applyMetricResult(dailyRes, "dailyErrors", (x) => setChartDailyErrors(x.daily_errors ?? []), () => setChartDailyErrors([]));
+      applyMetricResult(outlierRes, "outliers", (x) => setOutlierDailyErrors(x.daily_errors ?? []), () => setOutlierDailyErrors([]));
     }
 
-    void backtestDays;
-    void dailyErrorLimit;
-    void outlierLimit;
+    if (isStale()) return;
+    setLoading((prev) => ({ ...prev, kpis: false, dailyErrors: false, outliers: false }));
   }, [runId, modelKey, startDate, horizonDays, historyDays, backtestDays, dailyErrorLimit, outlierLimit]);
 
   useEffect(() => {
@@ -425,9 +453,9 @@ export function useForecastDashboardData({
       setHasQuantiles(false);
       return;
     }
-    const w = parseSeriesToWeeklyPoints(payload);
-    setWeekly(w);
-    setHasQuantiles(w.some((p) => p.p05 != null && p.p95 != null));
+    const next = parseSeriesToWeeklyPoints(payload);
+    setWeekly(next);
+    setHasQuantiles(next.some((p) => p.p05 != null && p.p95 != null));
   }, [payload]);
 
   return {

@@ -7,6 +7,7 @@ import pandas as pd
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+from app.services.data_loader import load_daily_weight_series
 from app.services.series_store import SeriesStore
 
 # IMPORTANT:
@@ -36,7 +37,7 @@ class SeriesRequest(BaseModel):
 
 class ActualPoint(BaseModel):
     date: str = Field(..., description="YYYY-MM-DD")
-    actual: float
+    value: float
 
 
 class ForecastPoint(BaseModel):
@@ -152,7 +153,8 @@ def reload_datasets() -> Dict[str, Any]:
     return store.reload()
 
 
-@router.post("/series/{dataset_key}", response_model=SeriesResponse)
+@router.post("/{dataset_key}", response_model=SeriesResponse)
+@router.post("/series/{dataset_key}", response_model=SeriesResponse)  # backward-compatible alias
 def get_series(dataset_key: str, req: SeriesRequest) -> SeriesResponse:
     # validate date range
     if req.end_date < req.start_date:
@@ -162,7 +164,16 @@ def get_series(dataset_key: str, req: SeriesRequest) -> SeriesResponse:
     try:
         s = store.get(dataset_key)
     except KeyError:
-        raise HTTPException(status_code=404, detail=f"Dataset '{dataset_key}' not available")
+        # one retry after reload (e.g. data dir/env changed after startup)
+        store.reload()
+        try:
+            s = store.get(dataset_key)
+        except KeyError:
+            # last fallback: direct read without cache
+            try:
+                s = load_daily_weight_series(dataset_key, target_col="sum_weight")
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=f"Dataset '{dataset_key}' could not be loaded: {e}")
 
     # store meta for response
     meta_obj = store.available().get(dataset_key)
@@ -184,7 +195,7 @@ def get_series(dataset_key: str, req: SeriesRequest) -> SeriesResponse:
                 continue
             if pd.isna(fv):
                 continue
-            actuals.append(ActualPoint(date=_iso(idx), actual=fv))
+            actuals.append(ActualPoint(date=_iso(idx), value=fv))
 
     # If no history usable -> return 200 with empty arrays
     if not actuals:
@@ -205,7 +216,7 @@ def get_series(dataset_key: str, req: SeriesRequest) -> SeriesResponse:
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Forecast engine import failed: {e}")
 
-    history_y = [p.actual for p in actuals]
+    history_y = [p.value for p in actuals]
 
     try:
         points = forecast_next_days(
